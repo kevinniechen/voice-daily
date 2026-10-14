@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f6f7f9">
+<title>Ten Minute Voice</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,400;7..72,600&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* Layout: one narrow column; a four-step strip on top, the active step below, one big action button per step. */
+:root{
+  --bg:#f6f7f9; --surface:#ffffff; --ink:#16202c; --muted:#5f6b7a; --line:#dfe3e9;
+  --accent:#2f54d4; --accent-soft:#e6ecff; --rec:#d6334a; --ok:#1f8a5b;
+  --read:"Literata",Georgia,"Times New Roman",serif;
+  --ui:"Public Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#11151b; --surface:#1a2029; --ink:#e7ebf1; --muted:#97a2b1; --line:#2b333e;
+  --accent:#8aa4ff; --accent-soft:#232d4a; --rec:#ff6b7f; --ok:#4fc58d; color-scheme:dark;
+}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 var(--ui);-webkit-tap-highlight-color:transparent;
+  padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+.wrap{max-width:640px;margin:0 auto;padding-inline:16px;padding-block:16px 48px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font:600 18px/1.2 var(--ui);margin:0;letter-spacing:-.01em}
+.streak{display:flex;gap:4px;align-items:center;color:var(--muted);font-size:13px}
+.streak i{width:9px;height:9px;border-radius:50%;background:var(--line);display:block}
+.streak i.on{background:var(--ok)}
+.streak b{font-weight:600;color:var(--ink);margin-left:6px;font-variant-numeric:tabular-nums}
+
+nav.steps{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:16px 0 20px}
+nav.steps button{all:unset;cursor:pointer;display:flex;flex-direction:column;gap:2px;padding:8px 8px 7px;border-radius:10px;
+  border:1px solid var(--line);background:var(--surface);min-width:0}
+nav.steps button span{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+nav.steps button small{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+nav.steps button[aria-current="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+nav.steps button.done span::after{content:" ✓";color:var(--ok)}
+nav.steps button:focus-visible,button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
+h2{font:600 22px/1.2 var(--ui);margin:0;text-wrap:balance}
+.how{color:var(--muted);margin:0 0 16px;max-width:60ch}
+.timer{font:600 22px/1 var(--ui);font-variant-numeric:tabular-nums;background:none;border:1px solid var(--line);color:var(--ink);
+  border-radius:999px;padding:8px 14px;cursor:pointer;flex:none}
+.timer.run{border-color:var(--accent);color:var(--accent)}
+.timer.end{border-color:var(--ok);color:var(--ok)}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px}
+.text{font:400 19px/1.65 var(--read);max-width:65ch}
+.text p{margin:0 0 .8em}
+.text p:last-child{margin:0}
+.w{cursor:pointer;border-radius:3px}
+.w.mk{font-weight:600;text-decoration:underline;text-decoration-color:var(--accent);text-decoration-thickness:2px;text-underline-offset:4px}
+.src{color:var(--muted);font-size:13px;margin-top:12px}
+.src a{color:inherit}
+
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
+.btn{font:500 15px/1 var(--ui);padding:12px 16px;border-radius:12px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;
+  display:inline-flex;align-items:center;gap:8px;min-height:44px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.btn.rec{background:var(--rec);border-color:var(--rec);color:#fff}
+.btn.rec.live::before{content:"";width:9px;height:9px;border-radius:50%;background:#fff;animation:blink 1s infinite}
+.btn.ghost{background:none}
+.btn[disabled]{opacity:.45;cursor:default}
+.grow{flex:1}
+@keyframes blink{50%{opacity:.2}}
+@media (prefers-reduced-motion:reduce){.btn.rec.live::before{animation:none}}
+
+ol.moves{margin:0;padding:0;list-style:none;display:grid;gap:8px}
+ol.moves li{display:grid;grid-template-columns:52px 1fr;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+ol.moves li.now{border-color:var(--accent);background:var(--accent-soft)}
+ol.moves li b{display:block;font-weight:600}
+ol.moves li small{color:var(--muted)}
+ol.moves .t{font-variant-numeric:tabular-nums;color:var(--muted);font-size:14px;padding-top:1px}
+
+.shadow{position:relative;max-height:46vh;overflow:auto;scroll-behavior:smooth}
+.s{cursor:pointer;border-radius:4px;padding:1px 0;transition:background .15s}
+.s.cur{background:var(--accent-soft);box-shadow:0 0 0 3px var(--accent-soft)}
+.s.played{color:var(--muted)}
+.state{font-size:14px;color:var(--muted);min-height:21px;margin-top:10px;font-variant-numeric:tabular-nums}
+.state.you{color:var(--rec);font-weight:600}
+select{font:inherit;font-size:15px;padding:9px 10px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink);min-height:44px;max-width:100%}
+label.tog{display:inline-flex;gap:6px;align-items:center;font-size:14px;color:var(--muted);cursor:pointer}
+
+.takes{display:grid;gap:8px;margin-top:16px}
+.take{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.take .d{font-weight:600;font-variant-numeric:tabular-nums}
+.take .tag{font-size:12px;color:var(--muted)}
+.take audio{width:100%;height:36px}
+.take .x{margin-left:auto;font-size:13px;color:var(--muted);background:none;border:0;cursor:pointer;padding:6px}
+.take .x.sure{color:var(--rec);font-weight:600}
+.note{font-size:14px;color:var(--muted)}
+.empty{padding:16px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:14px}
+footer{margin-top:40px;color:var(--muted);font-size:13px;line-height:1.6}
+footer a{color:inherit}
+@media (max-width:420px){
+  nav.steps{grid-template-columns:repeat(5,minmax(0,1fr));gap:4px}
+  nav.steps button{padding:7px 6px}
+  .text{font-size:18px}
+  .card{padding:16px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Ten Minute Voice</h1>
+    <div class="streak" id="streak" aria-label="Last 14 days"></div>
+  </header>
+  <nav class="steps" id="steps"></nav>
+  <main id="view"></main>
+  <footer>
+    Recordings stay on this device (browser storage). Audio from <a href="https://librivox.org" target="_blank" rel="noopener">LibriVox</a> and text from <a href="https://www.gutenberg.org" target="_blank" rel="noopener">Project Gutenberg</a>, both public domain, synced sentence by sentence.
+  </footer>
+</div>
+<audio id="player" preload="auto"></audio>
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const h = (tag, attrs = {}, ...kids) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) el.append(k.nodeType ? k : document.createTextNode(k));
+  return el;
+};
+
+/* ---------- small storage ---------- */
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("tmv:" + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("tmv:" + k, JSON.stringify(v)); } catch {} },
+};
+const today = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
+const fmt = s => { s = Math.max(0, Math.ceil(s)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+
+/* ---------- recordings in IndexedDB ---------- */
+const idb = (() => {
+  let p;
+  const open = () => p ||= new Promise((res, rej) => {
+    const r = indexedDB.open("tmv", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("takes", { keyPath: "id" });
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  const tx = async (mode, fn) => { const db = await open(); return new Promise((res, rej) => {
+    const t = db.transaction("takes", mode); const out = fn(t.objectStore("takes"));
+    t.oncomplete = () => res(out.result); t.onerror = () => rej(t.error); }); };
+  return {
+    put: v => tx("readwrite", s => s.put(v)).catch(() => null),
+    all: () => tx("readonly", s => s.getAll()).catch(() => []),
+    del: id => tx("readwrite", s => s.delete(id)).catch(() => null),
+  };
+})();
+
+/* ---------- recorder ---------- */
+const recorder = {
+  mr: null, chunks: [], stream: null,
+  async start() {
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
+    const type = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+    this.mr = new MediaRecorder(this.stream, type ? { mimeType: type } : undefined);
+    this.chunks = [];
+    this.mr.ondataavailable = e => e.data.size && this.chunks.push(e.data);
+    this.mr.start(250);
+  },
+  stop() {
+    return new Promise(res => {
+      if (!this.mr) return res(null);
+      this.mr.onstop = () => {
+        this.stream.getTracks().forEach(t => t.stop());
+        res(new Blob(this.chunks, { type: this.mr.mimeType || "audio/webm" }));
+        this.mr = null;
+      };
+      this.mr.stop();
+    });
+  },
+  get live() { return !!this.mr; },
+};
+
+/* A record/playback widget. kind: "daily" | "weekly" */
+function recWidget(kind, label, onSaved) {
+  const box = h("div", { class: "bar" });
+  const btn = h("button", { class: "btn rec", type: "button" }, "Record");
+  const msg = h("span", { class: "note" });
+  let t0 = 0, iv;
+  btn.addEventListener("click", async () => {
+    if (!recorder.live) {
+      try { await recorder.start(); }
+      catch { msg.textContent = "Microphone blocked. Allow it in your browser's site settings, then try again."; return; }
+      t0 = Date.now(); btn.classList.add("live"); btn.textContent = "Stop 0:00";
+      iv = setInterval(() => btn.textContent = "Stop " + fmt((Date.now() - t0) / 1000), 500);
+      msg.textContent = "";
+    } else {
+      clearInterval(iv); btn.classList.remove("live"); btn.textContent = "Record again";
+      const blob = await recorder.stop();
+      if (!blob) return;
+      const take = { id: kind + ":" + Date.now(), kind, date: today(), ts: Date.now(), label: typeof label === "function" ? label() : label, secs: Math.round((Date.now() - t0) / 1000), blob };
+      await idb.put(take);
+      if (kind === "daily") pruneDaily();
+      onSaved && onSaved(take);
+    }
+  });
+  box.append(btn, msg);
+  return box;
+}
+async function pruneDaily() {
+  const all = (await idb.all()).filter(t => t.kind === "daily").sort((a, b) => b.ts - a.ts);
+  for (const t of all.slice(10)) await idb.del(t.id);
+}
+function takeRow(t, onDelete, tag) {
+  const url = URL.createObjectURL(t.blob);
+  const x = h("button", { class: "x", type: "button" }, "Delete");
+  x.addEventListener("click", async () => {
+    if (!x.classList.contains("sure")) { x.classList.add("sure"); x.textContent = "Tap to confirm"; setTimeout(() => { x.classList.remove("sure"); x.textContent = "Delete"; }, 3000); return; }
+    await idb.del(t.id); onDelete && onDelete();
+  });
+  const d = new Date(t.ts);
+  return h("div", { class: "take" },
+    h("span", { class: "d" }, d.toLocaleDateString(undefined, { month: "short", day: "numeric" })),
+    h("span", { class: "tag" }, (tag ? tag + " · " : "") + fmt(t.secs)), x,
+    h("audio", { controls: true, preload: "metadata", src: url }));
+}
+
+/* ---------- timer + chime ---------- */
+let actx;
+function chime() {
+  try {
+    actx ||= new (window.AudioContext || window.webkitAudioContext)();
+    [660, 880].forEach((f, i) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.frequency.value = f; o.connect(g); g.connect(actx.destination);
+      const t = actx.currentTime + i * 0.18;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.2, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+      o.start(t); o.stop(t + 0.55);
+    });
+  } catch {}
+  try { navigator.vibrate && navigator.vibrate(120); } catch {}
+}
+let wake;
+async function keepAwake(on) {
+  try { if (on && !wake) { wake = await navigator.wakeLock.request("screen"); wake.addEventListener("release", () => wake = null); } else if (!on && wake) { await wake.release(); wake = null; } } catch {}
+}
+function makeTimer(total, onTick, onEnd) {
+  let left = total, iv = null, last;
+  const el = h("button", { class: "timer", type: "button", "aria-label": "Start or pause timer" }, fmt(left));
+  const paint = () => { el.textContent = left <= 0 ? "Done" : fmt(left); el.classList.toggle("run", !!iv); el.classList.toggle("end", left <= 0); };
+  const stop = () => { clearInterval(iv); iv = null; keepAwake(false); paint(); };
+  const start = () => {
+    if (left <= 0) left = total;
+    last = Date.now(); keepAwake(true);
+    iv = setInterval(() => {
+      const n = Date.now(); left -= (n - last) / 1000; last = n;
+      onTick && onTick(total - left);
+      if (left <= 0) { left = 0; stop(); chime(); onEnd && onEnd(); }
+      paint();
+    }, 200);
+    paint();
+  };
+  el.addEventListener("click", () => iv ? stop() : start());
+  return { el, start, stop, get running() { return !!iv; } };
+}
+
+/* ---------- content ---------- */
+const WARMUP = [
+  ["Hum", "Lips closed, hum low to high and back. Feel the buzz in your lips and nose.", 15],
+  ["Lip trills", "Blow through loose lips like a motorboat, sliding the pitch up and down.", 15],
+  ["Jaw and tongue", "Big yawns, chew slowly with your mouth open, tongue circles behind the lips.", 15],
+  ["Sirens", "Slide on “ng” or “ooo” from your lowest note to your highest, slowly.", 15],
+];
+const ENUNCIATE = [
+  { t: "Hamlet’s advice to the players", a: "William Shakespeare", p: [
+    "Speak the speech, I pray you, as I pronounced it to you, trippingly on the tongue. But if you mouth it, as many of your players do, I had as lief the town-crier spoke my lines. Nor do not saw the air too much with your hand, thus, but use all gently; for in the very torrent, tempest, and, as I may say, whirlwind of passion, you must acquire and beget a temperance that may give it smoothness."] },
+  { t: "I am the very model of a modern Major-General", a: "W. S. Gilbert", p: [
+    "I am the very model of a modern Major-General, I’ve information vegetable, animal, and mineral, I know the kings of England, and I quote the fights historical, from Marathon to Waterloo, in order categorical; I’m very well acquainted, too, with matters mathematical, I understand equations, both the simple and quadratical."] },
+  { t: "The Bells", a: "Edgar Allan Poe", p: [
+    "Hear the sledges with the bells, silver bells! What a world of merriment their melody foretells! How they tinkle, tinkle, tinkle, in the icy air of night! While the stars that oversprinkle all the heavens, seem to twinkle with a crystalline delight; keeping time, time, time, in a sort of Runic rhyme, to the tintinnabulation that so musically wells from the bells, bells, bells, bells, bells, bells, bells, from the jingling and the tinkling of the bells."] },
+  { t: "The Cataract of Lodore", a: "Robert Southey", p: [
+    "The cataract strong then plunges along, striking and raging as if a war waging its caverns and rocks among: rising and leaping, sinking and creeping, swelling and sweeping, showering and springing, flying and flinging, writhing and ringing, eddying and whisking, spouting and frisking, turning and twisting, around and around with endless rebound!"] },
+  { t: "Jabberwocky", a: "Lewis Carroll", p: [
+    "\u2019Twas brillig, and the slithy toves did gyre and gimble in the wabe: all mimsy were the borogoves, and the mome raths outgrabe.",
+    "\u201cBeware the Jabberwock, my son! The jaws that bite, the claws that catch! Beware the Jubjub bird, and shun the frumious Bandersnatch!\u201d"] },
+  { t: "Consonant ladder", a: "Traditional", p: [
+    "Red leather, yellow leather. Unique New York, unique New York. Peter Piper picked a peck of pickled peppers. She sells sea shells by the seashore, and the shells she sells are sea shells, I\u2019m sure. The sixth sick sheikh\u2019s sixth sheep\u2019s sick. Truly rural, truly plural."] },
+];
+
+let BOOKS = [], PAGES = [];
+function buildPages() {
+  PAGES = [];
+  for (const b of BOOKS) {
+    let cur = [], n = 0;
+    for (const para of b.paras) {
+      const text = para.map(s => s.t).join(" ");
+      cur.push(text); n += text.split(" ").length;
+      if (n >= 140) { PAGES.push({ book: b, paras: cur }); cur = []; n = 0; }
+    }
+    if (cur.length) PAGES.push({ book: b, paras: cur });
+  }
+}
+
+/* ---------- day log ---------- */
+function dayLog() { return store.get("days", {}); }
+function markStep(id) {
+  const d = dayLog(); const k = today(); d[k] ||= []; if (!d[k].includes(id)) d[k].push(id); store.set("days", d); paintNav(); paintStreak();
+}
+function paintStreak() {
+  const d = dayLog(), el = $("#streak"); el.innerHTML = "";
+  let streak = 0;
+  for (let i = 13; i >= 0; i--) {
+    const dt = new Date(); dt.setDate(dt.getDate() - i);
+    const k = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+    el.append(h("i", { class: d[k]?.length ? "on" : "", title: k }));
+  }
+  for (let i = 0; ; i++) {
+    const dt = new Date(); dt.setDate(dt.getDate() - i);
+    const k = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+    if (d[k]?.length) streak++; else if (i > 0) break;
+    if (i > 400) break;
+  }
+  el.append(h("b", {}, streak + (streak === 1 ? " day" : " days")));
+}
+
+/* ---------- steps ---------- */
+const STEPS = [
+  { id: "warm", name: "Warm up", mins: 1, render: renderWarm },
+  { id: "read", name: "Read", mins: 5, render: renderRead },
+  { id: "shadow", name: "Shadow", mins: 3, render: renderShadow },
+  { id: "enun", name: "Enunciate", mins: 2, render: renderEnun },
+  { id: "week", name: "Weekly", mins: 0, render: renderWeek },
+];
+let current = store.get("step", "warm");
+function paintNav() {
+  const nav = $("#steps"); nav.innerHTML = ""; const done = dayLog()[today()] || [];
+  for (const s of STEPS) {
+    const b = h("button", { type: "button", "aria-current": String(s.id === current), class: done.includes(s.id) ? "done" : "" },
+      h("span", {}, s.name), h("small", {}, s.mins ? s.mins + " min" : weekDue() ? "due" : "1× a week"));
+    b.addEventListener("click", () => go(s.id));
+    nav.append(b);
+  }
+}
+let cleanup = null;
+function go(id) {
+  if (cleanup) { cleanup(); cleanup = null; }
+  if (recorder.live) recorder.stop();
+  current = id; store.set("step", id); paintNav();
+  const v = $("#view"); v.innerHTML = "";
+  STEPS.find(s => s.id === id).render(v);
+  window.scrollTo({ top: 0 });
+}
+function nextBtn(id) {
+  const i = STEPS.findIndex(s => s.id === id), nx = STEPS[i + 1];
+  return h("button", { class: "btn primary", type: "button", onclick: () => { markStep(id); nx && nx.id !== "week" ? go(nx.id) : finish(); } },
+    nx && nx.id !== "week" ? "Done, next: " + nx.name : "Finish today");
+}
+function finish() {
+  markStep("enun");
+  const v = $("#view"); v.innerHTML = "";
+  v.append(h("div", { class: "head" }, h("h2", {}, "Done for today")),
+    h("p", { class: "how" }, weekDue() ? "Your weekly recording is due. It takes about a minute." : "Nice work. Come back tomorrow."),
+    h("div", { class: "bar" }, weekDue() ? h("button", { class: "btn primary", type: "button", onclick: () => go("week") }, "Record the weekly page") : null));
+}
+
+function stepHead(title, secs, how, onTick) {
+  const timer = makeTimer(secs, onTick, () => {});
+  const wrap = h("div", {}, h("div", { class: "head" }, h("h2", {}, title), timer.el), h("p", { class: "how" }, how));
+  return { wrap, timer };
+}
+
+function renderWarm(v) {
+  const list = h("ol", { class: "moves" });
+  let acc = 0;
+  const items = WARMUP.map(([n, d, s]) => { const li = h("li", {}, h("span", { class: "t" }, fmt(acc) ), h("div", {}, h("b", {}, n), h("small", {}, d))); acc += s; list.append(li); return li; });
+  const { wrap, timer } = stepHead("Warm up", 60, "Tap the timer and follow along. Fifteen seconds each, loose and easy.", el => {
+    let a = 0; items.forEach((li, i) => { li.classList.toggle("now", el >= a && el < a + WARMUP[i][2]); a += WARMUP[i][2]; });
+  });
+  v.append(wrap, list, h("div", { class: "bar" }, nextBtn("warm")));
+  cleanup = () => timer.stop();
+}
+
+function renderRead(v) {
+  let pi = Math.min(store.get("page", 0), PAGES.length - 1);
+  const { wrap, timer } = stepHead("Read aloud", 300,
+    "Tap the words that matter to mark them. Then record yourself reading, with bigger pitch movement on the marked words.");
+  const card = h("div", { class: "card" });
+  const pos = h("span", { class: "note grow" });
+  const prev = h("button", { class: "btn ghost", type: "button", "aria-label": "Previous page" }, "←");
+  const next = h("button", { class: "btn ghost", type: "button", "aria-label": "Next page" }, "→");
+  const takes = h("div", { class: "takes" });
+  const paint = () => {
+    const pg = PAGES[pi], key = "marks:" + pi, marks = new Set(store.get(key, []));
+    card.innerHTML = ""; let wi = 0;
+    const text = h("div", { class: "text" });
+    for (const p of pg.paras) {
+      const el = h("p");
+      p.split(" ").forEach((w, j) => {
+        const i = wi++;
+        const s = h("span", { class: "w" + (marks.has(i) ? " mk" : "") }, w);
+        s.addEventListener("click", () => { marks.has(i) ? marks.delete(i) : marks.add(i); s.classList.toggle("mk"); store.set(key, [...marks]); });
+        el.append(s, " ");
+      });
+      text.append(el);
+    }
+    card.append(text, h("div", { class: "src" }, pg.book.title + ", " + pg.book.author));
+    pos.textContent = "Page " + (pi + 1) + " of " + PAGES.length;
+    prev.disabled = pi === 0; next.disabled = pi === PAGES.length - 1;
+    store.set("page", pi);
+  };
+  const paintTakes = async () => {
+    const all = (await idb.all()).filter(t => t.kind === "daily").sort((a, b) => b.ts - a.ts).slice(0, 3);
+    takes.innerHTML = "";
+    if (all.length) takes.append(h("div", { class: "note" }, "Recent takes"), ...all.map(t => takeRow(t, paintTakes, t.label)));
+  };
+  prev.onclick = () => { pi--; paint(); }; next.onclick = () => { pi++; paint(); };
+  paint();
+  v.append(wrap, h("div", { class: "bar", style: "margin:0 0 10px" }, prev, pos, next), card,
+    recWidget("daily", () => "Page " + (pi + 1), paintTakes),
+    takes, h("div", { class: "bar" }, nextBtn("read")));
+  paintTakes();
+  cleanup = () => timer.stop();
+}
+
+/* Shadowing: play one sentence, pause for you to repeat, move on. */
+function renderShadow(v) {
+  const audio = $("#player");
+  let bi = store.get("book", 0); if (!BOOKS[bi]) bi = 0;
+  let flat = [], idx = 0, phase = "idle", raf = 0, gapT = 0;
+  const auto = h("input", { type: "checkbox", id: "auto" }); auto.checked = store.get("auto", true);
+  const slow = h("input", { type: "checkbox", id: "slow" }); slow.checked = store.get("slow", false);
+  const sel = h("select", { id: "book", "aria-label": "Book" }, BOOKS.map((b, i) => h("option", { value: i }, b.title + ", " + b.author)));
+  sel.value = bi;
+  const box = h("div", { class: "card shadow text" });
+  const state = h("div", { class: "state" });
+  const playB = h("button", { class: "btn primary grow", type: "button" }, "Play sentence");
+  const prevB = h("button", { class: "btn", type: "button", "aria-label": "Previous sentence" }, "←");
+  const againB = h("button", { class: "btn", type: "button" }, "Again");
+  const nextB = h("button", { class: "btn", type: "button", "aria-label": "Next sentence" }, "→");
+  const src = h("div", { class: "src" });
+  const { wrap, timer } = stepHead("Shadow", 180,
+    "Listen to one sentence, then say it back right away, copying the narrator’s pitch, pauses, and stress. Tap any sentence to jump there.");
+
+  const load = () => {
+    const b = BOOKS[bi]; flat = []; box.innerHTML = "";
+    b.paras.forEach(p => { const el = h("p"); p.forEach(s => { const i = flat.length; const sp = h("span", { class: "s" }, s.t); sp.addEventListener("click", () => { stop(); idx = i; paint(true); play(); }); flat.push({ ...s, el: sp }); el.append(sp, " "); }); box.append(el); });
+    idx = Math.min(store.get("pos:" + b.id, 0), flat.length - 1);
+    audio.src = b.audio; audio.preload = "auto";
+    src.innerHTML = ""; src.append(b.why ? b.why + " " : "", "Read by " + b.reader + " for ", h("a", { href: b.source, target: "_blank", rel: "noopener" }, "LibriVox"), ". Text from ", h("a", { href: b.text, target: "_blank", rel: "noopener" }, "Project Gutenberg"), ".");
+    paint(true);
+  };
+  const paint = (scroll) => {
+    flat.forEach((s, i) => { s.el.classList.toggle("cur", i === idx); s.el.classList.toggle("played", i < idx); });
+    store.set("pos:" + BOOKS[bi].id, idx);
+    if (scroll && flat[idx]) { const el = flat[idx].el; box.scrollTop = el.offsetTop - 60; }
+    const s = flat[idx];
+    if (phase === "idle") state.textContent = "Sentence " + (idx + 1) + " of " + flat.length;
+    state.classList.toggle("you", phase === "you");
+    playB.textContent = phase === "idle" ? "Play sentence" : "Pause";
+  };
+  const stop = () => { cancelAnimationFrame(raf); clearTimeout(gapT); audio.pause(); phase = "idle"; paint(); };
+  const play = () => {
+    const s = flat[idx]; if (!s) return;
+    if (!timer.running) timer.start();
+    phase = "listen"; audio.playbackRate = slow.checked ? 0.85 : 1;
+    const begin = () => { audio.currentTime = s.s; audio.play().catch(() => { phase = "idle"; state.textContent = "Tap Play again to start the audio."; paint(); }); tick(); };
+    if (audio.readyState >= 1) begin(); else { state.textContent = "Loading audio…"; audio.addEventListener("loadedmetadata", begin, { once: true }); audio.load(); }
+    state.textContent = "Listen…"; paint();
+  };
+  const tick = () => {
+    const s = flat[idx];
+    if (audio.currentTime >= s.e) {
+      audio.pause();
+      phase = "you";
+      const gap = Math.max(1.5, (s.e - s.s) / audio.playbackRate * 1.15 + 0.6);
+      let left = gap;
+      const step = () => {
+        state.textContent = "Your turn: say it back  " + Math.ceil(left) + "s";
+        if (left <= 0) {
+          if (auto.checked && idx < flat.length - 1) { idx++; paint(true); play(); } else { phase = "idle"; paint(); }
+          return;
+        }
+        left -= 0.25; gapT = setTimeout(step, 250);
+      };
+      paint(); step();
+      return;
+    }
+    raf = requestAnimationFrame(tick);
+  };
+  playB.onclick = () => phase === "idle" ? play() : stop();
+  againB.onclick = () => { stop(); play(); };
+  prevB.onclick = () => { stop(); if (idx > 0) idx--; paint(true); };
+  nextB.onclick = () => { stop(); if (idx < flat.length - 1) idx++; paint(true); };
+  sel.onchange = () => { stop(); bi = +sel.value; store.set("book", bi); load(); };
+  auto.onchange = () => store.set("auto", auto.checked);
+  slow.onchange = () => store.set("slow", slow.checked);
+  v.append(wrap,
+    h("div", { class: "bar", style: "margin:0 0 12px" }, sel, h("label", { class: "tog", for: "auto" }, auto, "Auto-advance"), h("label", { class: "tog", for: "slow" }, slow, "Slower")),
+    box, state,
+    h("div", { class: "bar" }, prevB, playB, againB, nextB), src,
+    h("div", { class: "bar" }, nextBtn("shadow")));
+  load();
+  cleanup = () => { stop(); timer.stop(); };
+}
+
+function renderEnun(v) {
+  const n = Math.floor(Date.now() / 864e5) % ENUNCIATE.length;
+  let k = store.get("enunPick:" + today(), n);
+  const { wrap, timer } = stepHead("Enunciate", 120,
+    "Read this very slowly. Exaggerate every mouth movement: full lip rounding, crisp consonants, open vowels. Then read it once at normal speed.");
+  const card = h("div", { class: "card" });
+  const paint = () => { const e = ENUNCIATE[k]; card.innerHTML = ""; card.append(h("div", { class: "text" }, e.p.map(p => h("p", {}, p))), h("div", { class: "src" }, e.t + ", " + e.a)); };
+  const other = h("button", { class: "btn ghost", type: "button", onclick: () => { k = (k + 1) % ENUNCIATE.length; store.set("enunPick:" + today(), k); paint(); } }, "Different paragraph");
+  paint();
+  v.append(wrap, card, h("div", { class: "bar" }, other), h("div", { class: "bar" }, nextBtn("enun")));
+  cleanup = () => timer.stop();
+}
+
+/* Weekly: the same page every week, compared side by side. */
+async function weeklyTakes() { return (await idb.all()).filter(t => t.kind === "weekly").sort((a, b) => b.ts - a.ts); }
+let weeklyCache = [];
+function weekDue() { const last = weeklyCache[0]; return !last || Date.now() - last.ts > 6.5 * 864e5; }
+function renderWeek(v) {
+  const pg = PAGES[0];
+  const card = h("div", { class: "card" }, h("div", { class: "text" }, pg.paras.map(p => h("p", {}, p))), h("div", { class: "src" }, pg.book.title + ", " + pg.book.author + " · always this page"));
+  const list = h("div", { class: "takes" });
+  const paint = async () => {
+    weeklyCache = await weeklyTakes(); paintNav();
+    list.innerHTML = "";
+    if (!weeklyCache.length) { list.append(h("div", { class: "empty" }, "No weekly recordings yet. Record this page today; next week you will hear the two side by side.")); return; }
+    const [latest, prev] = weeklyCache, first = weeklyCache[weeklyCache.length - 1];
+    list.append(h("div", { class: "note" }, "Compare"));
+    list.append(takeRow(latest, paint, "This week"));
+    if (prev) list.append(takeRow(prev, paint, "Week before"));
+    if (first !== latest && first !== prev) list.append(takeRow(first, paint, "Your first"));
+    const rest = weeklyCache.slice(2).filter(t => t !== first);
+    if (rest.length) list.append(h("div", { class: "note", style: "margin-top:8px" }, "Earlier"), ...rest.map(t => takeRow(t, paint)));
+  };
+  v.append(h("div", { class: "head" }, h("h2", {}, "Weekly recording")),
+    h("p", { class: "how" }, "Once a week, record this same page. Listen to it next to last week’s: is the pitch moving more, are the marked words landing, are the endings crisp?"),
+    card, recWidget("weekly", "Weekly page", () => { markStep("week"); paint(); }), list);
+  paint();
+}
+
+/* ---------- boot ---------- */
+(async () => {
+  try { BOOKS = await (await fetch("books.json")).json(); } catch { BOOKS = []; }
+  buildPages();
+  weeklyCache = await weeklyTakes();
+  paintStreak();
+  go(STEPS.some(s => s.id === current) ? current : "warm");
+})();
+</script>
+</body>
+</html>
