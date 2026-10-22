@@ -39,7 +39,9 @@ def coach_ready(): return True
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "60"))
 IMPORT_ORIGINS = {"https://kevinniechen.github.io"}
 IMPORT_TOKENS = {}  # token -> (user_id, expires)
-STATIC = {"/": "index.html", "/index.html": "index.html", "/books.json": "books.json"}
+STATIC = {"/": "index.html", "/index.html": "index.html", "/books.json": "books.json", "/manifest.webmanifest": "manifest.webmanifest",
+          "/icon-192.png": "icon-192.png", "/icon-512.png": "icon-512.png", "/apple-touch-icon.png": "apple-touch-icon.png"}
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 os.makedirs(os.path.join(DATA, "audio"), exist_ok=True)
 
 # ---------- db ----------
@@ -57,6 +59,7 @@ CREATE INDEX IF NOT EXISTS takes_user ON takes(user_id, ts);
 """)
 for ddl in ("ALTER TABLE takes ADD COLUMN plan TEXT",       # next-session plan
             "ALTER TABLE takes ADD COLUMN drill_id TEXT",   # set on drill attempts
+            "ALTER TABLE takes ADD COLUMN filed INTEGER",   # 1 once its lessons are in the drill library
             """CREATE TABLE drills(id TEXT PRIMARY KEY, user_id TEXT, title TEXT, area TEXT, lesson TEXT, from_take TEXT,
                  created INTEGER, due INTEGER, interval INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, status TEXT DEFAULT 'active')"""):
     try: db.execute(ddl)  # added after launch; no-op once applied
@@ -286,7 +289,7 @@ def call_openrouter(model, prompt, audio_b64, schema=None):
     body = {
         "model": model, "max_tokens": 32000, "reasoning": {"effort": "high"},
         "messages": [{"role": "user", "content": [
-            {"type": "input_audio", "input_audio": {"data": audio_b64, "format": "mp3"}},
+            *[{"type": "input_audio", "input_audio": {"data": a, "format": "mp3"}} for a in ([audio_b64] if isinstance(audio_b64, str) else audio_b64)],
             {"type": "text", "text": prompt}]}],
         "response_format": {"type": "json_schema", "json_schema": {"name": "feedback", "strict": True, "schema": schema or FEEDBACK_SCHEMA}},
     }
@@ -307,7 +310,7 @@ def call_openrouter(model, prompt, audio_b64, schema=None):
 def call_gemini(model, prompt, audio_b64, schema=None):
     key = os.environ.get("GEMINI_API_KEY")
     body = {
-        "contents": [{"role": "user", "parts": [{"inline_data": {"mime_type": "audio/mp3", "data": audio_b64}}, {"text": prompt}]}],
+        "contents": [{"role": "user", "parts": [*[{"inline_data": {"mime_type": "audio/mp3", "data": a}} for a in ([audio_b64] if isinstance(audio_b64, str) else audio_b64)], {"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema or FEEDBACK_SCHEMA,
                              "thinkingConfig": {"thinkingLevel": os.environ.get("GEMINI_THINKING", "high")}},
     }
@@ -364,9 +367,9 @@ def analyze(take_id):
             try: words = transcribe(mp3)
             except Exception: traceback.print_exc(); words = None
             if words is not None: q("UPDATE takes SET words=? WHERE id=?", (json.dumps(words), take_id))
-        if r["kind"] == "drill": return grade_drill(r, mp3, words)
+        if r["kind"] in GRADERS: return GRADERS[r["kind"]](r, mp3, words)
         hist = [json.loads(h["feedback"]) | {"ts": h["ts"], "_plan": json.loads(h["plan"]) if h["plan"] else None} for h in q(
-            "SELECT feedback, plan, ts FROM takes WHERE user_id=? AND status='done' AND kind!='drill' AND ts<? ORDER BY ts DESC LIMIT 4", (r["user_id"], r["ts"]))][::-1]
+            "SELECT feedback, plan, ts FROM takes WHERE user_id=? AND status='done' AND kind IN ('daily','weekly','upload') AND ts<? ORDER BY ts DESC LIMIT 4", (r["user_id"], r["ts"]))][::-1]
         pros = None
         if words:
             try: pros = prosody(mp3, words)
@@ -387,7 +390,9 @@ def analyze(take_id):
         traceback.print_exc()
         q("UPDATE takes SET status='error', error=? WHERE id=?", (str(e)[:500], take_id))
         return
-    if r["kind"] != "drill": plan_next(take_id)
+    if r["kind"] in READ_KINDS:
+        file_drills(take_id)
+        plan_next(take_id)
 
 # ---------- drills: an exercise from a lesson, practised on its own and repeated on a schedule ----------
 GRADE_SCHEMA = _obj({
@@ -403,44 +408,135 @@ def drill_json(d, attempts):
     return {k: d[k] for k in ("id", "title", "area", "created", "due", "interval", "streak", "status", "from_take")} | {
         "lesson": json.loads(d["lesson"]), "attempts": attempts}
 
-def grade_drill(r, mp3, words):
-    d = q("SELECT * FROM drills WHERE id=?", (r["drill_id"],), one=True)
-    if not d: raise RuntimeError("This drill no longer exists.")
-    lesson = json.loads(d["lesson"])
-    past = [json.loads(a["feedback"]) | {"ts": a["ts"]} for a in q(
-        "SELECT feedback, ts FROM takes WHERE drill_id=? AND status='done' AND ts<? ORDER BY ts DESC LIMIT 3", (d["id"], r["ts"]))][::-1]
-    pros = None
+def word_table(pros):
+    return "\n".join("%.2f-%.2f | %s | %s | %s | %s | %s | %s | %s" % (w["s"], w["e"], w["w"], w["st"], w["move"], w["db"], w["tail"], w["gap"], w.get("p"))
+                     for w in pros["words"])
+
+GRADE_INTRO = ("You are the student's voice teacher. Listen and grade this one attempt the way a teacher would in the room: "
+               "got_it = the target skill is clearly there; almost = moving in the right direction but not consistent; "
+               "not_yet = the old habit is still in charge. Be brief and specific, name the physical cause when you can, "
+               "and link what you mention in the student's recording as [words as spoken](start-end) with times in seconds.")
+
+def quick_grade(r, mp3, words, task, past, ref_mp3=None):
+    """Short graded feedback on a focused attempt (drill, shadowing, enunciation). ref_mp3: the narrator, for shadowing."""
+    pros = ref_pros = None
     if words:
         try: pros = prosody(mp3, words)
         except Exception: traceback.print_exc()
-    prompt = "\n\n".join(filter(None, [
-        "You are the student's voice teacher. They just recorded themselves doing a drill you gave them, on its own, "
-        "right after reading your instructions. Listen and grade this one attempt the way a teacher would in the room: "
-        "got_it = the target skill is clearly there; almost = moving in the right direction but not consistent; "
-        "not_yet = the old habit is still in charge. Judge only the skill this drill targets. "
-        "Be brief and specific, and link what you mention as [words as spoken](start-end) with times in seconds.",
-        "The drill: %s (%s)\nThe problem it fixes: %s\nWhy it happens: %s\nExercise: %s\nSteps:\n%s\nWhen it's working: %s" % (
-            d["title"], d["area"], CITE.sub(lambda m: m[1], lesson.get("hear", "")), lesson.get("why", ""), lesson.get("exercise", ""),
-            "\n".join("- " + x for x in lesson.get("steps", [])), lesson.get("feel", "")),
+    prompt = "\n\n".join(filter(None, [GRADE_INTRO, task,
         "Their earlier attempts (oldest first):\n" + "\n".join("- %s: %s. %s" % (
             time.strftime("%b %d", time.localtime(a["ts"] / 1000)), a["grade"], CITE.sub(lambda m: m[1], a["note"])) for a in past) if past else "",
-        "Transcript with per-word measurements (start-end s | word | st | move | db | tail | gap | p), as supporting evidence; trust your ears:\n" +
-            "\n".join("%.2f-%.2f | %s | %s | %s | %s | %s | %s | %s" % (w["s"], w["e"], w["w"], w["st"], w["move"], w["db"], w["tail"], w["gap"], w.get("p"))
-                      for w in pros["words"]) if pros else "",
-    ]))
+        ("Student recording" + (" (the second audio)" if ref_mp3 else "") + ": transcript with per-word measurements "
+         "(start-end s | word | st | move | db | tail | gap | p), as supporting evidence; trust your ears:\n" + word_table(pros)) if pros else ""]))
+    audios = []
+    for f in ([ref_mp3] if ref_mp3 else []) + [mp3]:
+        with open(f, "rb") as fh: audios.append(base64.b64encode(fh.read()).decode())
     fb = used = None
-    with open(mp3, "rb") as f: b64 = base64.b64encode(f.read()).decode()
     for via, m in LISTENERS:
-        try: fb, used = (call_openrouter if via == "openrouter" else call_gemini)(m, prompt, b64, GRADE_SCHEMA), m.split("/")[-1]; break
+        try: fb, used = (call_openrouter if via == "openrouter" else call_gemini)(m, prompt, audios, GRADE_SCHEMA), m.split("/")[-1]; break
         except Unavailable as e: print("%s %s unavailable: %s" % (via, m, e), flush=True)
     if fb is None:
         if not pros: raise RuntimeError("Couldn't hear this attempt (is anything audible?).")
-        fb, used = call_claude(prompt.replace("Listen and grade", "You can't hear it; from the measurements, grade"), schema=GRADE_SCHEMA, effort="medium"), CLAUDE_MODEL
+        if ref_mp3:
+            try:
+                rw = transcribe(ref_mp3); ref_pros = prosody(ref_mp3, rw) if rw else None
+            except Exception: traceback.print_exc()
+            if ref_pros: prompt += "\n\nNarrator recording (the first audio), same measurements:\n" + word_table(ref_pros)
+        fb, used = call_claude("You can't hear the audio; work from the measurements.\n\n" + prompt, schema=GRADE_SCHEMA, effort="medium"), CLAUDE_MODEL
     dur = r["secs"] or 1e9
     for k in ("note", "tip"):
         fb[k] = CITE.sub(lambda m: "[%s](%.1f-%.1f)" % (m[1], max(0, min(float(m[2]), dur)), max(0, min(float(m[3] or float(m[2]) + 1.5), dur))), fb.get(k, ""))
     q("UPDATE takes SET status='done', feedback=?, model=?, analyzed=? WHERE id=?", (json.dumps(fb), used, int(time.time()), r["id"]))
+    return fb
+
+def past_attempts(r, where, args):
+    return [json.loads(a["feedback"]) | {"ts": a["ts"]} for a in q(
+        "SELECT feedback, ts FROM takes WHERE " + where + " AND status='done' AND ts<? ORDER BY ts DESC LIMIT 3", args + (r["ts"],))][::-1]
+
+def grade_drill(r, mp3, words):
+    d = q("SELECT * FROM drills WHERE id=?", (r["drill_id"],), one=True)
+    if not d: raise RuntimeError("This drill no longer exists.")
+    lesson = json.loads(d["lesson"])
+    task = ("They just recorded themselves doing a drill you gave them, on its own, right after reading your instructions. "
+            "Judge only the skill this drill targets.\n\n"
+            "The drill: %s (%s)\nThe problem it fixes: %s\nWhy it happens: %s\nExercise: %s\nSteps:\n%s\nWhen it's working: %s" % (
+            d["title"], d["area"], CITE.sub(lambda m: m[1], lesson.get("hear", "")), lesson.get("why", ""), lesson.get("exercise", ""),
+            "\n".join("- " + x for x in lesson.get("steps", [])), lesson.get("feel", "")))
+    fb = quick_grade(r, mp3, words, task, past_attempts(r, "drill_id=?", (d["id"],)))
     schedule(d, fb["grade"], r["ts"] / 1000)
+
+def grade_enun(r, mp3, words):
+    task = ("This is their enunciation exercise: read the passage once slowly with exaggerated articulation "
+            "(full lip rounding, crisp consonants, open vowels), then once at normal speed. Judge articulation only: "
+            "consonant precision, finished final consonants, clear vowels, how actively lips, tongue tip and jaw work, "
+            "and whether the clarity survives in the normal-speed pass. Grade on the normal-speed pass.\n\nThe passage (%s):\n\"\"\"%s\"\"\"" % (r["label"], r["text"]))
+    quick_grade(r, mp3, words, task, past_attempts(r, "user_id=? AND kind='enun'", (r["user_id"],)))
+
+BOOKS = None
+def book(bid):
+    global BOOKS
+    if BOOKS is None:
+        with open(os.path.join(APP, "books.json")) as f: BOOKS = {b["id"]: b for b in json.load(f)}
+    return BOOKS.get(bid)
+
+def grade_shadow(r, mp3, words):
+    """Cut the narrator's audio for the sentences they shadowed, so the coach hears both side by side."""
+    meta = json.loads(r["marks"] or "{}") if (r["marks"] or "").startswith("{") else {}
+    b, sents = book(meta.get("book")), meta.get("sentences") or []
+    sents = [x for x in sents if x.get("you_at") is not None][:20]
+    if not b or not sents: raise RuntimeError("No sentences were shadowed while recording.")
+    ref = audio_path(r, "narrator.mp3")
+    parts = "".join("[0:a]atrim=start=%.2f:end=%.2f,asetpts=PTS-STARTPTS[a%d];" % (x["ns"], x["ne"], i) for i, x in enumerate(sents))
+    graph = parts + "".join("[a%d]" % i for i in range(len(sents))) + "concat=n=%d:v=0:a=1[out]" % len(sents)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", os.path.join(APP, b["audio"]), "-filter_complex", graph, "-map", "[out]",
+                    "-ac", "1", "-ar", "24000", "-b:a", "64k", ref], check=True, capture_output=True)
+    lines, at = [], 0.0
+    for i, x in enumerate(sents):
+        d = x["ne"] - x["ns"]
+        lines.append("%d. \"%s\" - narrator: %.1f-%.1fs in the first audio; student's repeat: %.1f-%.1fs in the second audio" % (
+            i + 1, x["text"], at, at + d, x["you_at"], x.get("you_end") or x["you_at"] + d * 1.2 + 0.6))
+        at += d
+    task = ("This is their shadowing exercise. They hear one sentence from a professional narrator, then say it straight back, "
+            "copying the narrator's pitch shape, stress, pauses, pace and energy. You get two audios: FIRST, the narrator's sentences "
+            "back to back; SECOND, the student's recording. In the student's recording, compare only their repeat windows listed below; "
+            "between them the narrator may be faintly audible through their speakers - ignore that. For each sentence, notice how "
+            "closely they matched the narrator's delivery, then grade how well they copied it overall. In the note, compare concretely "
+            "(e.g. 'he lifts \"never\" and pauses before \"night\"; you stayed level and ran through [never at night](12.1-13.0)'). "
+            "Link times in the student's recording only.\n\nSentences:\n" + "\n".join(lines))
+    quick_grade(r, mp3, words, task, past_attempts(r, "user_id=? AND kind='shadow'", (r["user_id"],)), ref_mp3=ref)
+
+GRADERS = {"drill": grade_drill, "enun": grade_enun, "shadow": grade_shadow}
+READ_KINDS = ("daily", "weekly", "upload")  # full reviews; the rest get a quick grade
+
+FILE_SCHEMA = _obj({"new": {"type": "array", "items": {"type": "integer"},
+                             "description": "Indexes of lessons whose exercise is not already covered by one of the existing drills."}})
+
+def make_drill(t, n, lesson, due):
+    did = "%s-L%d" % (t["id"], n)
+    if not q("SELECT 1 FROM drills WHERE id=?", (did,), one=True):
+        q("INSERT INTO drills(id,user_id,title,area,lesson,from_take,created,due) VALUES(?,?,?,?,?,?,?,?)",
+          (did, t["user_id"], lesson.get("title", ""), lesson.get("area", ""), json.dumps(lesson), t["id"], int(time.time()), due))
+    return did
+
+def file_drills(take_id):
+    """Put each new exercise from a review into the drill library, due now. Claude skips ones the library already covers."""
+    t = q("SELECT * FROM takes WHERE id=?", (take_id,), one=True)
+    lessons = (json.loads(t["feedback"]) if t and t["feedback"] else {}).get("lessons") or []
+    if not lessons: return q("UPDATE takes SET filed=1 WHERE id=?", (take_id,))
+    have = q("SELECT id, title, lesson FROM drills WHERE user_id=? AND status='active'", (t["user_id"],))
+    new = list(range(len(lessons)))
+    if have:
+        try:
+            new = call_claude("A voice student's drill library and the lessons from their newest review. Which lessons teach something "
+                "the library doesn't already drill? A lesson is covered if an existing drill works on the same habit with the same kind of "
+                "exercise, even if worded differently.\n\nExisting drills:\n" + "\n".join(
+                    "- %s: %s" % (d["title"], json.loads(d["lesson"]).get("exercise", "")) for d in have) +
+                "\n\nNew lessons:\n" + "\n".join("%d. %s: %s" % (i, l.get("title", ""), l.get("exercise", "")) for i, l in enumerate(lessons)),
+                schema=FILE_SCHEMA, effort="low")["new"]
+        except Exception: traceback.print_exc()
+    for n in sorted(set(i for i in new if 0 <= i < len(lessons))):
+        make_drill(t, n, lessons[n], int(time.time()))
+    q("UPDATE takes SET filed=1 WHERE id=?", (take_id,))
 
 def schedule(d, grade, when):
     """Only attempts made when the drill was due move the schedule; extra practice is just logged."""
@@ -499,7 +595,7 @@ def worker():
     while True:
         tid = jobs.get()
         try:
-            if isinstance(tid, tuple): plan_next(tid[1])
+            if isinstance(tid, tuple): {"plan": plan_next, "file": file_drills}[tid[0]](tid[1])
             else: analyze(tid)
         finally: jobs.task_done()
 
@@ -647,11 +743,7 @@ class H(BaseHTTPRequestHandler):
             t = q("SELECT * FROM takes WHERE id=? AND user_id=?", (a.get("take_id"), me["id"]), one=True)
             lessons = (json.loads(t["feedback"]) if t and t["feedback"] else {}).get("lessons") or []
             if not 0 <= n < len(lessons): return self.send(404, {"error": "lesson not found"})
-            did = "%s-L%d" % (t["id"], n)
-            if not q("SELECT 1 FROM drills WHERE id=?", (did,), one=True):
-                l = lessons[n]
-                q("INSERT INTO drills(id,user_id,title,area,lesson,from_take,created,due) VALUES(?,?,?,?,?,?,?,?)",
-                  (did, me["id"], l.get("title", ""), l.get("area", ""), json.dumps(l), t["id"], int(time.time()), int(time.time())))
+            did = make_drill(t, n, lessons[n], int(time.time()))
             d = q("SELECT * FROM drills WHERE id=?", (did,), one=True)
             return self.send(200, drill_json(d, [take_json(x) for x in q("SELECT * FROM takes WHERE drill_id=? ORDER BY ts", (did,))]))
         m = re.fullmatch(r"/api/takes/([\w:.-]+)/analyze", p)
@@ -693,7 +785,7 @@ class H(BaseHTTPRequestHandler):
         drill = q("SELECT id FROM drills WHERE id=? AND user_id=?", (meta.get("drill_id"), me["id"]), one=True) if meta.get("drill_id") else None
         q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status,drill_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
           (tid, me["id"], "drill" if drill else meta.get("kind", "daily"), meta.get("label", ""), ts, round(secs, 2), meta.get("text", ""),
-           json.dumps(meta.get("marks", [])), mime, "queued", drill["id"] if drill else None))
+           json.dumps(meta.get("shadow") if meta.get("kind") == "shadow" else meta.get("marks", [])), mime, "queued", drill["id"] if drill else None))
         self.queue_if_allowed(me, tid)
         return self.send(200, take_json(q("SELECT * FROM takes WHERE id=?", (tid,), one=True)), headers=extra)
 
@@ -727,8 +819,11 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     # resume anything interrupted by a restart (and takes recorded before a key was set)
+    # reviews from before the library existed: file their exercises (oldest first, so later ones dedupe against them)
+    for r in q("SELECT id FROM takes WHERE status='done' AND filed IS NULL AND kind IN ('daily','weekly','upload') ORDER BY ts"):
+        jobs.put(("file", r["id"]))
     # each person's latest review should have a plan for their next session
-    for r in q("SELECT t.id FROM takes t WHERE status='done' AND plan IS NULL AND kind!='drill' AND ts=(SELECT MAX(ts) FROM takes WHERE user_id=t.user_id AND status='done' AND kind!='drill')"):
+    for r in q("SELECT t.id FROM takes t WHERE status='done' AND plan IS NULL AND kind IN ('daily','weekly','upload') AND ts=(SELECT MAX(ts) FROM takes WHERE user_id=t.user_id AND status='done' AND kind IN ('daily','weekly','upload'))"):
         jobs.put(("plan", r["id"]))
     for r in q("SELECT id FROM takes WHERE status IN ('queued','processing')" + (" OR status='nokey'" if coach_ready() else "") + " ORDER BY ts"):
         jobs.put(r["id"])

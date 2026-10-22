@@ -3,7 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#f6f7f9">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#11151b" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Voice">
 <title>Ten Minute Voice</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -25,21 +33,48 @@
 html,body{margin:0}
 body{background:var(--bg);color:var(--ink);font:16px/1.5 var(--ui);-webkit-tap-highlight-color:transparent;
   padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
-.wrap{max-width:640px;margin:0 auto;padding-inline:16px;padding-block:16px 48px}
-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.wrap{max-width:640px;margin:0 auto;padding-inline:16px;padding-block:calc(12px + env(safe-area-inset-top,0px)) calc(96px + env(safe-area-inset-bottom,0px))}
+body{padding:0}
+/* Bottom tab bar, app style */
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:10;display:flex;justify-content:center;background:var(--surface);
+  border-top:1px solid var(--line);padding:6px 8px calc(6px + env(safe-area-inset-bottom,0px))}
+.tabs button{all:unset;cursor:pointer;flex:1;max-width:200px;display:flex;flex-direction:column;align-items:center;gap:2px;
+  padding:6px 0;font:600 12px/1.2 var(--ui);color:var(--muted);position:relative;-webkit-tap-highlight-color:transparent}
+.tabs button svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.tabs button[aria-current="page"]{color:var(--accent)}
+.tabs .badge{position:absolute;top:2px;left:calc(50% + 8px);min-width:18px;height:18px;border-radius:9px;background:var(--rec);color:#fff;
+  font:700 11px/18px var(--ui);text-align:center;padding:0 5px;box-sizing:border-box}
+.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:10px}
+.hud{display:flex;gap:8px;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);background:var(--surface);border-radius:999px;
+  padding:5px 10px;font:600 13px/1 var(--ui);font-variant-numeric:tabular-nums}
+.chip.hot{border-color:#f0a35e;color:#c4581a}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 12px}
+.stat{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:12px;text-align:center}
+.stat b{display:block;font:600 24px/1.1 var(--ui);font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--muted)}
+.days{display:flex;gap:5px;justify-content:space-between;margin:0 0 16px}
+.days i{flex:1;height:8px;border-radius:4px;background:var(--line)}
+.days i.on{background:var(--ok)}
+.done-card{text-align:center;padding:28px 18px}
+.done-card .big{font:700 44px/1 var(--ui);margin:6px 0}
+.install{display:flex;gap:10px;align-items:center;justify-content:space-between}
+.install p{margin:0;font-size:14px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}
 h1{font:600 18px/1.2 var(--ui);margin:0;letter-spacing:-.01em}
 .streak{display:flex;gap:4px;align-items:center;color:var(--muted);font-size:13px}
 .streak i{width:9px;height:9px;border-radius:50%;background:var(--line);display:block}
 .streak i.on{background:var(--ok)}
 .streak b{font-weight:600;color:var(--ink);margin-left:6px;font-variant-numeric:tabular-nums}
 
-nav.steps{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:16px 0 20px}
+nav.steps{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:0 0 20px}
 nav.steps button{all:unset;cursor:pointer;display:flex;flex-direction:column;gap:2px;padding:8px 8px 7px;border-radius:10px;
   border:1px solid var(--line);background:var(--surface);min-width:0}
 nav.steps button span{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 nav.steps button small{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
 nav.steps button[aria-current="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
-nav.steps button.done span::after{content:" ✓";color:var(--ok)}
+nav.steps button.done{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,var(--surface))}
+nav.steps button.done small::before{content:"✓ ";color:var(--ok);font-weight:700}
 nav.steps button:focus-visible,button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 .head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
@@ -97,6 +132,7 @@ label.tog{display:inline-flex;gap:6px;align-items:center;font-size:14px;color:va
 .note{font-size:14px;color:var(--muted)}
 .empty{padding:16px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:14px}
 footer{margin-top:40px;color:var(--muted);font-size:13px;line-height:1.6}
+footer[hidden],nav.steps[hidden]{display:none}
 footer a{color:inherit}
 
 /* Coach feedback */
@@ -135,6 +171,7 @@ footer a{color:inherit}
 .dots{display:flex;gap:4px;padding-top:4px;flex:none}
 .dots i{width:10px;height:10px;border-radius:50%;background:var(--line);display:block}
 .dots i.got_it{background:var(--ok)} .dots i.almost{background:var(--accent)} .dots i.not_yet{background:var(--rec)}
+.drill details.last > summary{cursor:pointer;font-size:14px;color:var(--muted);font-weight:600;padding:2px 0}
 .att{display:grid;gap:6px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
 .att audio{width:100%;height:36px}
 .att .fb{border:0;margin:0;padding:0}
@@ -174,8 +211,10 @@ details.fbd[open] summary::before{content:"\25BE  "}
 .spark .dt{fill:var(--accent);stroke:var(--surface);stroke-width:2}
 .spark .gr{stroke:var(--line);stroke-width:1}
 @media (max-width:420px){
-  nav.steps{grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
-  nav.steps button{padding:7px 6px}
+  nav.steps{grid-template-columns:repeat(5,minmax(0,1fr));gap:4px}
+  nav.steps button{padding:8px 2px;align-items:center;text-align:center}
+  nav.steps button span{font-size:11px;overflow:visible;text-overflow:clip;letter-spacing:-.01em}
+  nav.steps button small{font-size:10.5px}
   .text{font-size:18px}
   .card{padding:16px}
 }
@@ -185,14 +224,15 @@ details.fbd[open] summary::before{content:"\25BE  "}
 <div class="wrap">
   <header>
     <h1>Ten Minute Voice</h1>
-    <div class="streak" id="streak" aria-label="Last 14 days"></div>
+    <div class="hud" id="hud"></div>
   </header>
   <nav class="steps" id="steps"></nav>
   <main id="view"></main>
-  <footer>
+  <footer id="foot">
     Your recordings and progress are saved to your account, so they follow you across devices. Audio from <a href="https://librivox.org" target="_blank" rel="noopener">LibriVox</a> and text from <a href="https://www.gutenberg.org" target="_blank" rel="noopener">Project Gutenberg</a>, both public domain, synced sentence by sentence.
   </footer>
 </div>
+<nav class="tabs" id="tabs" aria-label="Sections"></nav>
 <audio id="player" preload="auto"></audio>
 <script>
 "use strict";
@@ -313,7 +353,8 @@ async function loadTakes() {
   PLAN = TAKES.find(t => t.plan)?.plan || null;
   return TAKES;
 }
-const reads = () => TAKES.filter(t => t.kind !== "drill");
+const QUICK = { drill: 1, shadow: 1, enun: 1 };  // graded in ~30s, not a full review
+const reads = () => TAKES.filter(t => !QUICK[t.kind]);
 const dayKey = ts => new Date(ts).toDateString();
 /* "Session 2" when you read more than once that day; "" otherwise. */
 function sessionOf(t) {
@@ -328,7 +369,7 @@ function focusNote(text) {
 }
 
 /* A record/playback widget. kind: "daily" | "weekly". meta() returns { label, text, marks }. */
-function recWidget(kind, meta, onSaved) {
+function recWidget(kind, meta, onSaved, onStart) {
   const box = h("div", { class: "bar" });
   const btn = h("button", { class: "btn rec", type: "button" }, "Record");
   const msg = h("span", { class: "note" });
@@ -337,7 +378,7 @@ function recWidget(kind, meta, onSaved) {
     if (!recorder.live) {
       try { await recorder.start(); }
       catch { msg.textContent = "Microphone blocked. Allow it in your browser's site settings, then try again."; return; }
-      t0 = Date.now(); btn.classList.add("live"); btn.textContent = "Stop 0:00";
+      t0 = Date.now(); btn.classList.add("live"); btn.textContent = "Stop 0:00"; onStart && onStart(t0);
       iv = setInterval(() => btn.textContent = "Stop " + fmt((Date.now() - t0) / 1000), 500);
       msg.textContent = "";
     } else {
@@ -347,7 +388,7 @@ function recWidget(kind, meta, onSaved) {
       const take = { id: kind + ":" + Date.now(), kind, ts: Date.now(), secs: Math.round((Date.now() - t0) / 1000), blob, ...meta() };
       msg.textContent = "Saving…"; btn.disabled = true;
       let saved = take;
-      try { saved = await api.upload(take); msg.textContent = kind === "drill" ? "" : "Saved. Your coach is listening; feedback appears below in a minute or two."; }
+      try { saved = await api.upload(take); msg.textContent = QUICK[kind] ? "" : "Saved. Your coach is listening; feedback appears below in a minute or two."; }
       catch (e) { await idb.put(take); msg.textContent = "Couldn't reach the server, so this take is saved on this device and will upload next time. (" + e.message + ")"; }
       btn.disabled = false;
       await loadTakes();
@@ -380,11 +421,11 @@ function feedbackPanel(t, audio, open, onDone) {
     el.innerHTML = "";
     if (t.status === "queued" || t.status === "processing") {
       waited = true;
-      el.append(h("div", { class: "fbstate" }, t.kind === "drill" ? "Coach is listening…" : t.status === "queued" ? "Waiting for the coach…" : "Coach is listening and writing notes (1 to 2 minutes)…"));
+      el.append(h("div", { class: "fbstate" }, QUICK[t.kind] ? "Coach is listening…" : t.status === "queued" ? "Waiting for the coach…" : "Coach is listening and writing notes (1 to 2 minutes)…"));
       return watch(t.id, paint);
     }
     if (waited && onDone) { waited = false; return onDone(t); }
-    if (t.kind === "drill" && t.feedback) {
+    if (t.feedback?.grade) {
       const g = GRADES[t.feedback.grade] || GRADES.almost;
       el.append(h("div", { class: "grade " + t.feedback.grade }, g[0] + " " + g[1]), h("p", {}, rich(t.feedback.note, audio)),
         t.feedback.tip ? h("p", { class: "try" }, rich(t.feedback.tip, audio)) : null);
@@ -466,6 +507,7 @@ const GRADES = { got_it: ["✓", "Got it"], almost: ["◐", "Almost"], not_yet: 
 const dueNow = d => d.status === "active" && d.due * 1000 <= Date.now();
 function drillCard(d, opts = {}) {
   const box = h("div", { class: "drill" });
+  let fresh = false;
   const paint = d => {
     const att = d.attempts || [], last = att[att.length - 1], l = d.lesson;
     const when = d.status === "graduated" ? "Learned" : dueNow(d) ? "Due today"
@@ -482,14 +524,41 @@ function drillCard(d, opts = {}) {
       h("details", { open: !att.length || opts.inLesson },
         h("summary", {}, l.exercise), l.steps?.length ? h("ol", {}, l.steps.map(x => h("li", {}, x.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")))) : null,
         l.feel ? h("p", { class: "note" }, "When it’s working: " + l.feel.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")) : null),
-      recWidget("drill", () => ({ label: d.title, drill_id: d.id }), async () => { await loadTakes(); paint(DRILLS.find(x => x.id === d.id) || d); }),
-      last ? attemptRow(last, () => api.drills().then(ds => { DRILLS = ds; paint(ds.find(x => x.id === d.id) || d); })) : null,
+      recWidget("drill", () => ({ label: d.title, drill_id: d.id }), async () => { await loadTakes(); fresh = true; paint(DRILLS.find(x => x.id === d.id) || d); }),
+      last ? h("details", { class: "last", open: fresh || opts.inLesson || !last.feedback },
+        h("summary", {}, "Last try: ", last.feedback ? (GRADES[last.feedback.grade] || GRADES.almost).join(" ") : "being graded…"),
+        attemptRow(last, () => api.drills().then(ds => { DRILLS = ds; paintTabs(); paint(ds.find(x => x.id === d.id) || d); }))) : null,
       att.length > 1 ? h("details", { class: "older" }, h("summary", {}, (att.length - 1) + " earlier attempt" + (att.length > 2 ? "s" : "")),
         att.slice(0, -1).reverse().map(a => attemptRow(a))) : null,
       opts.inLesson ? null : h("div", { class: "bar", style: "margin-top:4px" }, del)].filter(Boolean));
   };
   paint(d);
   return box;
+}
+/* Your latest graded attempt at a step, with the rest folded away. */
+function stepAttempts(kind) {
+  const box = h("div", {});
+  const paint = () => {
+    const att = TAKES.filter(t => t.kind === kind);
+    box.replaceChildren(...[att[0] ? attemptRow(att[0], async () => { await loadTakes(); paint(); }) : null,
+      att.length > 1 ? h("details", { class: "older" }, h("summary", {}, (att.length - 1) + " earlier attempt" + (att.length > 2 ? "s" : "")),
+        att.slice(1).map(a => attemptRow(a))) : null].filter(Boolean));
+  };
+  paint(); box.paint = paint;
+  return box;
+}
+/* Drills tab: every exercise your coach has given you. */
+function renderDrills(v) {
+  const due = DRILLS.filter(dueNow), soon = DRILLS.filter(d => d.status === "active" && !dueNow(d)).sort((a, b) => a.due - b.due),
+    learned = DRILLS.filter(d => d.status !== "active");
+  v.append(h("div", { class: "head" }, h("h2", {}, "Drills")),
+    h("p", { class: "how" }, "Every exercise your coach gives you lands here. Record one and it gets graded; pass it on schedule and it comes back less often, until it’s learned."),
+    h("div", { class: "stats" }, h("div", { class: "stat" }, h("b", {}, due.length), h("span", {}, "due today")),
+      h("div", { class: "stat" }, h("b", {}, soon.length), h("span", {}, "practising")), h("div", { class: "stat" }, h("b", {}, learned.length), h("span", {}, "learned"))));
+  if (!DRILLS.length) v.append(h("div", { class: "empty" }, "No drills yet. Record a read and your coach’s exercises will show up here."));
+  if (due.length) v.append(h("h3", { class: "sec" }, "Due today"), ...due.map(d => drillCard(d)));
+  if (soon.length) v.append(h("h3", { class: "sec" }, "Coming up"), ...soon.map(d => drillCard(d)));
+  if (learned.length) v.append(h("details", { class: "older" }, h("summary", {}, "Learned (" + learned.length + ")"), learned.map(d => drillCard(d))));
 }
 function attemptRow(t, onDone) {
   const audio = h("audio", { controls: true, preload: "none", src: "api/takes/" + encodeURIComponent(t.id) + "/audio" });
@@ -602,23 +671,24 @@ function buildPages() {
 /* ---------- day log ---------- */
 function dayLog() { return store.get("days", {}); }
 function markStep(id) {
-  const d = dayLog(); const k = today(); d[k] ||= []; if (!d[k].includes(id)) d[k].push(id); store.set("days", d); paintNav(); paintStreak();
+  const d = dayLog(); const k = today(); d[k] ||= []; if (!d[k].includes(id)) d[k].push(id); store.set("days", d); paintNav(); paintHud();
 }
-function paintStreak() {
-  const d = dayLog(), el = $("#streak"); el.innerHTML = "";
-  let streak = 0;
-  for (let i = 13; i >= 0; i--) {
+const dayStr = dt => dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+/* Days in a row with any practice, counting today only once you've practised (so the streak doesn't drop to 0 each morning). */
+function streak() {
+  const d = dayLog(); let n = 0;
+  for (let i = 0; i < 400; i++) {
     const dt = new Date(); dt.setDate(dt.getDate() - i);
-    const k = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
-    el.append(h("i", { class: d[k]?.length ? "on" : "", title: k }));
+    if (d[dayStr(dt)]?.length) n++; else if (i > 0) break;
   }
-  for (let i = 0; ; i++) {
-    const dt = new Date(); dt.setDate(dt.getDate() - i);
-    const k = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
-    if (d[k]?.length) streak++; else if (i > 0) break;
-    if (i > 400) break;
-  }
-  el.append(h("b", {}, streak + (streak === 1 ? " day" : " days")));
+  return n;
+}
+const CORE = ["warm", "read", "shadow", "enun"];
+const doneToday = () => (dayLog()[today()] || []).filter(x => CORE.includes(x)).length;
+function paintHud() {
+  const n = streak(), el = $("#hud");
+  el.replaceChildren(h("span", { class: "chip" + (n ? " hot" : ""), title: "Day streak" }, "🔥 " + n),
+    h("span", { class: "chip", title: "Today's steps" }, doneToday() + "/4 today"));
 }
 
 /* ---------- steps ---------- */
@@ -628,25 +698,43 @@ const STEPS = [
   { id: "shadow", name: "Shadow", mins: 2, render: renderShadow },
   { id: "enun", name: "Enunciate", mins: 1, render: renderEnun },
   { id: "week", name: "Weekly", mins: 0, render: renderWeek },
-  { id: "coach", name: "Progress", mins: 0, render: renderProgress },
 ];
+const ICON = {
+  today: '<svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg>',
+  drills: '<svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><path d="m16 17 2 2 4-4"/></svg>',
+  coach: '<svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+};
+const TABS = [{ id: "today", name: "Today" }, { id: "drills", name: "Drills", render: renderDrills }, { id: "coach", name: "Progress", render: renderProgress }];
+const tabOf = id => TABS.some(t => t.id === id && t.render) ? id : "today";
+function paintTabs() {
+  const due = DRILLS.filter(dueNow).length, at = tabOf(current);
+  $("#tabs").replaceChildren(...TABS.map(t => {
+    const b = h("button", { type: "button", "aria-current": t.id === at ? "page" : "false" }, h("span", {}), t.name,
+      t.id === "drills" && due ? h("span", { class: "badge", "aria-label": due + " due" }, due) : null);
+    b.firstChild.innerHTML = ICON[t.id];
+    b.addEventListener("click", () => go(t.id === "today" ? (STEPS.some(s => s.id === store.get("step")) ? store.get("step") : "warm") : t.id));
+    return b;
+  }));
+}
 let current = store.get("step", "warm");
 function paintNav() {
   const nav = $("#steps"); nav.innerHTML = ""; const done = dayLog()[today()] || [];
+  nav.hidden = tabOf(current) !== "today"; $("#foot").hidden = current !== "coach";
   for (const s of STEPS) {
     const b = h("button", { type: "button", "aria-current": String(s.id === current), class: done.includes(s.id) ? "done" : "" },
-      h("span", {}, s.name), h("small", {}, s.mins ? s.mins + " min" : s.id === "coach" ? (DRILLS.some(dueNow) ? DRILLS.filter(dueNow).length + (DRILLS.filter(dueNow).length === 1 ? " drill due" : " drills due") : reads().length + " takes") : weekDue() ? "due" : "1× a week"));
+      h("span", {}, s.name), h("small", {}, s.mins ? s.mins + " min" : weekDue() ? "due" : "1× a week"));
     b.addEventListener("click", () => go(s.id));
     nav.append(b);
   }
+  paintTabs();
 }
 let cleanup = null;
 function go(id) {
   if (cleanup) { cleanup(); cleanup = null; }
   if (recorder.live) recorder.stop();
-  current = id; store.set("step", id); paintNav();
+  current = id; if (STEPS.some(s => s.id === id)) store.set("step", id); store.set("tab", tabOf(id)); paintNav();
   const v = $("#view"); v.innerHTML = "";
-  STEPS.find(s => s.id === id).render(v);
+  (STEPS.find(s => s.id === id) || TABS.find(t => t.id === id)).render(v);
   window.scrollTo({ top: 0 });
 }
 function nextBtn(id) {
@@ -657,9 +745,16 @@ function nextBtn(id) {
 function finish() {
   markStep("enun");
   const v = $("#view"); v.innerHTML = "";
-  v.append(h("div", { class: "head" }, h("h2", {}, "Done for today")),
-    h("p", { class: "how" }, weekDue() ? "Your weekly recording is due. It takes about a minute." : "Nice work. Come back tomorrow."),
-    h("div", { class: "bar" }, weekDue() ? h("button", { class: "btn primary", type: "button", onclick: () => go("week") }, "Record the weekly page") : null));
+  const n = streak(), due = DRILLS.filter(dueNow).length;
+  v.append(h("div", { class: "card done-card" },
+      h("div", { class: "note" }, "Session complete"),
+      h("div", { class: "big" }, "🔥 " + n), h("div", {}, n === 1 ? "day streak. Good start." : "days in a row. Keep it going."),
+      h("p", { class: "how", style: "margin:14px auto 0" }, weekDue() ? "Your weekly recording is due. It takes about a minute."
+        : due ? due + (due === 1 ? " drill is" : " drills are") + " still due today." : "Your coach will have tomorrow’s plan ready.")),
+    h("div", { class: "bar", style: "justify-content:center" },
+      weekDue() ? h("button", { class: "btn primary", type: "button", onclick: () => go("week") }, "Record the weekly page")
+        : due ? h("button", { class: "btn primary", type: "button", onclick: () => go("drills") }, "Practise drills") : "",
+      h("button", { class: "btn", type: "button", onclick: () => go("coach") }, "See progress")));
 }
 
 function stepHead(title, secs, how, onTick) {
@@ -773,16 +868,21 @@ function renderShadow(v) {
     if (audio.readyState >= 1) begin(); else { state.textContent = "Loading audio…"; audio.addEventListener("loadedmetadata", begin, { once: true }); audio.load(); }
     state.textContent = "Listen…"; paint();
   };
+  /* While recording, note when each of your repeats starts and ends so the coach can line them up with the narrator. */
+  let recT0 = 0, shadowed = [];
+  const endTurn = () => { const l = shadowed[shadowed.length - 1]; if (l && l.you_end == null) l.you_end = (Date.now() - recT0) / 1000; };
   const tick = () => {
     const s = flat[idx];
     if (audio.currentTime >= s.e) {
       audio.pause();
       phase = "you";
+      if (recorder.live && recT0) { endTurn(); shadowed.push({ text: s.t, ns: s.s, ne: s.e, you_at: (Date.now() - recT0) / 1000 }); }
       const gap = Math.max(1.5, (s.e - s.s) / audio.playbackRate * 1.15 + 0.6);
       let left = gap;
       const step = () => {
         state.textContent = "Your turn: say it back  " + Math.ceil(left) + "s";
         if (left <= 0) {
+          endTurn();
           if (auto.checked && idx < flat.length - 1) { idx++; paint(true); play(); } else { phase = "idle"; paint(); }
           return;
         }
@@ -800,10 +900,16 @@ function renderShadow(v) {
   sel.onchange = () => { stop(); bi = +sel.value; store.set("book", bi); load(); };
   auto.onchange = () => store.set("auto", auto.checked);
   slow.onchange = () => store.set("slow", slow.checked);
+  const attempts = stepAttempts("shadow");
+  const rec = recWidget("shadow", () => { endTurn(); const out = { label: BOOKS[bi].title, shadow: { book: BOOKS[bi].id, sentences: shadowed } }; shadowed = []; return out; },
+    () => attempts.paint(), t0 => { recT0 = t0; shadowed = []; });
   v.append(wrap, focusNote(PLAN?.shadow_focus),
     h("div", { class: "bar", style: "margin:0 0 12px" }, sel, h("label", { class: "tog", for: "auto" }, auto, "Auto-advance"), h("label", { class: "tog", for: "slow" }, slow, "Slower")),
     box, state,
     h("div", { class: "bar" }, prevB, playB, againB, nextB), src,
+    h("h4", { class: "sub" }, "Get feedback"),
+    h("p", { class: "note", style: "margin:0" }, "Tap Record, shadow a few sentences, then Stop. Your coach compares each repeat with the narrator."),
+    rec, attempts,
     h("div", { class: "bar" }, nextBtn("shadow")));
   load();
   cleanup = () => { stop(); timer.stop(); };
@@ -822,7 +928,12 @@ function renderEnun(v) {
   const other = h("button", { class: "btn ghost", type: "button", onclick: () => {
     k = k + 1 >= ENUNCIATE.length ? (coach ? -1 : 0) : k + 1; store.set("enunPick:" + today(), k); paint(); } }, "Different paragraph");
   paint();
-  v.append(wrap, card, h("div", { class: "bar" }, other), h("div", { class: "bar" }, nextBtn("enun")));
+  const attempts = stepAttempts("enun");
+  v.append(wrap, card, h("div", { class: "bar" }, other),
+    h("h4", { class: "sub" }, "Get feedback"),
+    h("p", { class: "note", style: "margin:0" }, "Record both passes (slow, then normal speed) and your coach checks your articulation."),
+    recWidget("enun", () => { const e = k === -1 ? coach : ENUNCIATE[k]; return { label: e.t, text: e.p.join("\n") }; }, () => attempts.paint()),
+    attempts, h("div", { class: "bar" }, nextBtn("enun")));
   cleanup = () => timer.stop();
 }
 
@@ -863,13 +974,14 @@ function renderProgress(v) {
   const done = reads().filter(t => t.status === "done" && t.feedback?.scores).slice().reverse();
   v.append(h("div", { class: "head" }, h("h2", {}, "Progress")),
     h("p", { class: "how" }, "Every recording you make is kept here with your coach’s notes. Scores are 1 to 5; tap a timestamp to hear that moment."),
-    uploadWidget(() => go("coach")));
-  if (DRILLS.length) {
-    const active = DRILLS.filter(d => d.status === "active").sort((a, b) => a.due - b.due), learned = DRILLS.filter(d => d.status !== "active");
-    v.append(h("h3", { class: "sec" }, "Drills"), ...active.map(d => drillCard(d)),
-      learned.length ? h("details", { class: "older" }, h("summary", {}, "Learned (" + learned.length + ")"), learned.map(d => drillCard(d))) : "",
-      h("h3", { class: "sec" }, "Recordings"));
-  }
+    installCard(), uploadWidget(() => go("coach")));
+  const days = [], log = dayLog();
+  for (let i = 13; i >= 0; i--) { const dt = new Date(); dt.setDate(dt.getDate() - i); days.push(h("i", { class: log[dayStr(dt)]?.length ? "on" : "", title: dayStr(dt) })); }
+  v.append(h("div", { class: "stats" },
+      h("div", { class: "stat" }, h("b", {}, "🔥 " + streak()), h("span", {}, "day streak")),
+      h("div", { class: "stat" }, h("b", {}, reads().filter(t => t.kind === "daily").length), h("span", {}, "reads")),
+      h("div", { class: "stat" }, h("b", {}, DRILLS.filter(d => d.status !== "active").length), h("span", {}, "drills learned"))),
+    h("div", { class: "days", "aria-label": "Last 14 days" }, days));
   if (done.length) {
     const grid = h("div", { class: "sparks" });
     for (const [k, n] of SKILLS) grid.append(spark(n, done.map(t => ({ ts: t.ts, y: t.feedback.scores?.[k], s: sessionOf(t) })), 1, 5));
@@ -879,7 +991,7 @@ function renderProgress(v) {
   }
   const list = h("div", { class: "takes" });
   if (!reads().length) list.append(h("div", { class: "empty" }, "No recordings yet. Record yourself in the Read step and your coach’s notes will show up here."));
-  reads().forEach((t, i) => list.append(takeRow(t, () => go("coach"), t.kind === "weekly" ? "Weekly" : t.kind === "upload" ? "Uploaded" : null, i === 0)));
+  reads().forEach((t, i) => list.append(takeRow(t, () => go("coach"), t.kind === "weekly" ? "Weekly" : t.kind === "upload" ? "Uploaded" : null, false)));
   v.append(list);
 }
 /* One skill over time: a single-series sparkline (latest value large, a dot per session, hover for date). */
@@ -959,6 +1071,21 @@ function toast(msg) {
   $("#view").before(el); setTimeout(() => el.remove(), 15000);
 }
 
+/* Add to home screen: Android/desktop Chrome get a button; iPhone gets the two-tap instructions. Hidden once installed. */
+let installEvt = null;
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; });
+function installCard() {
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  if (standalone || store.get("installHidden", false)) return "";
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if (!ios && !installEvt) return "";
+  const card = h("div", { class: "card install", style: "margin:0 0 14px;padding:12px 14px" },
+    h("p", {}, ios ? "Use it like an app: tap Share, then “Add to Home Screen”." : "Use it like an app on your home screen."),
+    ios ? "" : h("button", { class: "btn primary", type: "button", onclick: async () => { installEvt.prompt(); await installEvt.userChoice; card.remove(); } }, "Install"),
+    h("button", { class: "linkbtn", type: "button", "aria-label": "Dismiss", onclick: () => { store.set("installHidden", true); card.remove(); } }, "✕"));
+  return card;
+}
+
 /* Any audio file (another app, a voice memo) can go through the coach too. */
 function uploadWidget(onDone) {
   const input = h("input", { type: "file", accept: "audio/*,video/*,.m4a,.webm,.mp3,.wav", multiple: true, style: "display:none" });
@@ -982,14 +1109,14 @@ function uploadWidget(onDone) {
   if (await importHandoff()) return;
   try { const r = await fetch("api/me"); if (r.status === 401) { location.href = "/__exe.dev/login?redirect=/"; return; } ME = await r.json(); } catch {}
   try { navigator.storage?.persist && navigator.storage.persist(); } catch {}
-  if (ME) { $("#streak").before(h("div", { class: "who" }, ME.email)); await sync.pull(); }
-  current = IMPORTED ? "coach" : store.get("step", "warm");
+  if (ME) { $("#foot").prepend(h("div", {}, "Signed in as " + ME.email + ".")); await sync.pull(); }
+  current = IMPORTED ? "coach" : store.get("tab", "today") !== "today" ? store.get("tab") : store.get("step", "warm");
   try { BOOKS = await (await fetch("books.json")).json(); } catch { BOOKS = []; }
   buildPages();
   if (ME) { await loadTakes(); flushLocal().then(async n => { if (n) { await loadTakes(); go(current); } }); }
   weeklyCache = await weeklyTakes();
-  paintStreak();
-  go(STEPS.some(s => s.id === current) ? current : "warm");
+  paintHud();
+  go(STEPS.some(s => s.id === current) || TABS.some(t => t.id === current && t.render) ? current : "warm");
 })();
 </script>
 </body>
