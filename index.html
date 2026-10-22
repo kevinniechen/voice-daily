@@ -120,6 +120,9 @@ footer a{color:inherit}
 .mo .try{color:var(--ink)}
 .mo .try::before{content:"Try: ";font-weight:600}
 .mo.playing{background:var(--accent-soft);border-radius:10px;padding-inline:8px;margin-inline:-8px}
+.focus{display:grid;gap:2px;border-left:3px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;padding:10px 12px;margin:0 0 14px;font-size:15px}
+.focus .lbl{font:600 11px/1.3 var(--ui);text-transform:uppercase;letter-spacing:.05em;color:var(--accent)}
+.focus small{color:var(--muted);font-size:12px}
 .lesson{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 10px}
 .lesson .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
 .lesson .lt{display:block;font-size:16px;margin:2px 0 8px}
@@ -278,8 +281,14 @@ async function flushLocal() {
   }
   return n;
 }
-let TAKES = [];
-async function loadTakes() { TAKES = await api.takes(); return TAKES; }
+let TAKES = [], PLAN = null;
+/* PLAN: what the coach set for this session, from your most recent review. */
+async function loadTakes() { TAKES = await api.takes(); PLAN = TAKES.find(t => t.plan)?.plan || null; return TAKES; }
+function focusNote(text) {
+  if (!text) return null;
+  const d = new Date(PLAN.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return h("div", { class: "focus" }, h("span", { class: "lbl" }, "Today’s focus"), h("span", {}, text), h("small", {}, "From your coach, after your " + d + " read"));
+}
 
 /* A record/playback widget. kind: "daily" | "weekly". meta() returns { label, text, marks }. */
 function recWidget(kind, meta, onSaved) {
@@ -568,14 +577,19 @@ function stepHead(title, secs, how, onTick) {
   return { wrap, timer };
 }
 
-function renderWarm(v) {
+function renderWarm(v, standard) {
+  const moves = !standard && PLAN?.warmup?.length ? PLAN.warmup.map(w => [w.name, w.cue, Math.max(8, Math.min(30, w.secs || 15))]) : WARMUP;
+  const total = moves.reduce((a, m) => a + m[2], 0);
   const list = h("ol", { class: "moves" });
   let acc = 0;
-  const items = WARMUP.map(([n, d, s]) => { const li = h("li", {}, h("span", { class: "t" }, fmt(acc) ), h("div", {}, h("b", {}, n), h("small", {}, d))); acc += s; list.append(li); return li; });
-  const { wrap, timer } = stepHead("Warm up", 60, "Tap the timer and follow along. Fifteen seconds each, loose and easy.", el => {
-    let a = 0; items.forEach((li, i) => { li.classList.toggle("now", el >= a && el < a + WARMUP[i][2]); a += WARMUP[i][2]; });
+  const items = moves.map(([n, d, s]) => { const li = h("li", {}, h("span", { class: "t" }, fmt(acc) ), h("div", {}, h("b", {}, n), h("small", {}, d))); acc += s; list.append(li); return li; });
+  const { wrap, timer } = stepHead("Warm up", total, moves === WARMUP ? "Tap the timer and follow along. Fifteen seconds each, loose and easy."
+      : PLAN.why || "Your coach picked these from your last review. Tap the timer and follow along.", el => {
+    let a = 0; items.forEach((li, i) => { li.classList.toggle("now", el >= a && el < a + moves[i][2]); a += moves[i][2]; });
   });
-  v.append(wrap, list, h("div", { class: "bar" }, nextBtn("warm")));
+  const swap = moves === WARMUP ? (PLAN?.warmup?.length ? h("button", { class: "linkbtn", type: "button", onclick: () => { cleanup(); v.innerHTML = ""; renderWarm(v); } }, "Use my coach’s warm-up") : null)
+    : h("button", { class: "linkbtn", type: "button", onclick: () => { cleanup(); v.innerHTML = ""; renderWarm(v, true); } }, "Use the standard warm-up instead");
+  v.append(wrap, list, h("div", { class: "bar" }, nextBtn("warm"), swap));
   cleanup = () => timer.stop();
 }
 
@@ -614,7 +628,7 @@ function renderRead(v) {
   };
   prev.onclick = () => { pi--; paint(); }; next.onclick = () => { pi++; paint(); };
   paint();
-  v.append(wrap, h("div", { class: "bar", style: "margin:0 0 10px" }, prev, pos, next), card,
+  v.append(wrap, focusNote(PLAN?.read_focus), h("div", { class: "bar", style: "margin:0 0 10px" }, prev, pos, next), card,
     recWidget("daily", () => pageMeta(pi, "Page " + (pi + 1)), paintTakes),
     takes, h("div", { class: "bar" }, nextBtn("read")));
   paintTakes();
@@ -693,7 +707,7 @@ function renderShadow(v) {
   sel.onchange = () => { stop(); bi = +sel.value; store.set("book", bi); load(); };
   auto.onchange = () => store.set("auto", auto.checked);
   slow.onchange = () => store.set("slow", slow.checked);
-  v.append(wrap,
+  v.append(wrap, focusNote(PLAN?.shadow_focus),
     h("div", { class: "bar", style: "margin:0 0 12px" }, sel, h("label", { class: "tog", for: "auto" }, auto, "Auto-advance"), h("label", { class: "tog", for: "slow" }, slow, "Slower")),
     box, state,
     h("div", { class: "bar" }, prevB, playB, againB, nextB), src,
@@ -703,13 +717,17 @@ function renderShadow(v) {
 }
 
 function renderEnun(v) {
-  const n = Math.floor(Date.now() / 864e5) % ENUNCIATE.length;
-  let k = store.get("enunPick:" + today(), n);
+  /* -1 is the passage your coach wrote for the sounds you fumble; the rest rotate daily. */
+  const coach = PLAN?.enunciate?.text ? { t: PLAN.enunciate.title || "From your coach", a: "Written for you by your coach", p: [PLAN.enunciate.text], how: PLAN.enunciate.how } : null;
+  const n = coach ? -1 : Math.floor(Date.now() / 864e5) % ENUNCIATE.length;
+  let k = store.get("enunPick:" + today(), n); if (k === -1 && !coach) k = 0;
   const { wrap, timer } = stepHead("Enunciate", 60,
     "Read it once slowly, exaggerating every mouth movement: full lip rounding, crisp consonants, open vowels. Then once at normal speed.");
   const card = h("div", { class: "card" });
-  const paint = () => { const e = ENUNCIATE[k]; card.innerHTML = ""; card.append(h("div", { class: "text" }, e.p.map(p => h("p", {}, p))), h("div", { class: "src" }, e.t + ", " + e.a)); };
-  const other = h("button", { class: "btn ghost", type: "button", onclick: () => { k = (k + 1) % ENUNCIATE.length; store.set("enunPick:" + today(), k); paint(); } }, "Different paragraph");
+  const paint = () => { const e = k === -1 ? coach : ENUNCIATE[k]; card.innerHTML = "";
+    card.append(e.how ? h("p", { class: "note", style: "margin:0 0 12px" }, e.how) : "", h("div", { class: "text" }, e.p.map(p => h("p", {}, p))), h("div", { class: "src" }, e.t + ", " + e.a)); };
+  const other = h("button", { class: "btn ghost", type: "button", onclick: () => {
+    k = k + 1 >= ENUNCIATE.length ? (coach ? -1 : 0) : k + 1; store.set("enunPick:" + today(), k); paint(); } }, "Different paragraph");
   paint();
   v.append(wrap, card, h("div", { class: "bar" }, other), h("div", { class: "bar" }, nextBtn("enun")));
   cleanup = () => timer.stop();

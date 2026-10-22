@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS takes(
   text TEXT, marks TEXT, mime TEXT, status TEXT, feedback TEXT, words TEXT, error TEXT, model TEXT, analyzed INTEGER);
 CREATE INDEX IF NOT EXISTS takes_user ON takes(user_id, ts);
 """)
+try: db.execute("ALTER TABLE takes ADD COLUMN plan TEXT")  # next-session plan, added after launch
+except sqlite3.OperationalError: pass
 
 def q(sql, args=(), one=False):
     with _db_lock:
@@ -66,6 +68,7 @@ def take_json(r):
     d = {k: r[k] for k in ("id", "kind", "label", "ts", "secs", "status", "error", "model")}
     d["feedback"] = json.loads(r["feedback"]) if r["feedback"] else None
     d["text"] = r["text"]; d["marks"] = json.loads(r["marks"] or "[]")
+    d["plan"] = json.loads(r["plan"]) if r["plan"] else None
     return d
 
 def audio_path(r, ext="mp3"): return os.path.join(DATA, "audio", r["user_id"], r["id"] + "." + ext)
@@ -240,10 +243,15 @@ def build_prompt(r, words, history, pros=None, listening=False):
         parts.append("\n\nTheir earlier sessions (oldest first), for the progress note:\n" + "\n".join(
             "- %s: %s Scores %s. Priorities then: %s" % (time.strftime("%b %d", time.localtime(h["ts"] / 1000)), h["summary"], json.dumps(h["scores"]), "; ".join(h["priorities"]))
             for h in history))
+        plan = history[-1].get("_plan")
+        if plan:
+            parts.append("\n\nAfter that last session you set them this focus for today, which they practised in the warm-up: "
+                         "reading focus: %s; warm-up: %s. Say in the progress note whether it is working, citing examples."
+                         % (plan.get("read_focus", ""), ", ".join(w["name"] for w in plan.get("warmup", []))))
     return "".join(parts)
 
 _claude = None
-def call_claude(prompt):
+def call_claude(prompt, schema=None, effort="high"):
     global _claude
     import anthropic
     if _claude is None:
@@ -252,7 +260,7 @@ def call_claude(prompt):
                                       default_headers={"anthropic-version": "2023-06-01"})  # SDK 2.x sends a date the gateway rejects
     with _claude.messages.stream(
         model=CLAUDE_MODEL, max_tokens=32000,
-        thinking={"type": "adaptive"}, output_config={"effort": "high", "format": {"type": "json_schema", "schema": FEEDBACK_SCHEMA}},
+        thinking={"type": "adaptive"}, output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema or FEEDBACK_SCHEMA}},
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
         msg = stream.get_final_message()
@@ -344,8 +352,8 @@ def analyze(take_id):
             try: words = transcribe(mp3)
             except Exception: traceback.print_exc(); words = None
             if words is not None: q("UPDATE takes SET words=? WHERE id=?", (json.dumps(words), take_id))
-        hist = [json.loads(h["feedback"]) | {"ts": h["ts"]} for h in q(
-            "SELECT feedback, ts FROM takes WHERE user_id=? AND status='done' AND ts<? ORDER BY ts DESC LIMIT 4", (r["user_id"], r["ts"]))][::-1]
+        hist = [json.loads(h["feedback"]) | {"ts": h["ts"], "_plan": json.loads(h["plan"]) if h["plan"] else None} for h in q(
+            "SELECT feedback, plan, ts FROM takes WHERE user_id=? AND status='done' AND ts<? ORDER BY ts DESC LIMIT 4", (r["user_id"], r["ts"]))][::-1]
         pros = None
         if words:
             try: pros = prosody(mp3, words)
@@ -365,11 +373,55 @@ def analyze(take_id):
     except Exception as e:
         traceback.print_exc()
         q("UPDATE takes SET status='error', error=? WHERE id=?", (str(e)[:500], take_id))
+        return
+    plan_next(take_id)
+
+# ---------- next-session plan ----------
+PLAN_SCHEMA = _obj({
+    "why": {"type": "string", "description": "One sentence to the student: what today's session targets and why, from the last review."},
+    "warmup": {"type": "array", "description": "3-4 moves, about 60 seconds in total, each aimed at a lesson from the review.",
+               "items": _obj({"name": {"type": "string", "description": "Short exercise name."},
+                              "cue": {"type": "string", "description": "One or two sentences: exactly what to do and what to feel."},
+                              "secs": {"type": "integer", "description": "10-20"}})},
+    "read_focus": {"type": "string", "description": "The ONE physical cue to hold while reading today, phrased as an instruction."},
+    "shadow_focus": {"type": "string", "description": "The ONE thing to copy from the narrator today, tied to the same issue."},
+    "enunciate": _obj({"title": {"type": "string"},
+                       "text": {"type": "string", "description": "A 40-70 word passage or set of lines, packed with the exact sounds and transitions this student fumbles. Can be original."},
+                       "how": {"type": "string", "description": "How to read it: one slow exaggerated pass with a specific physical cue, then one at speed."}}),
+})
+
+PLANNER = """You are the student's voice teacher planning their next 6-minute practice session \
+(1 min warm-up, 2 min read a page aloud and record it, 2 min shadow a narrator, 1 min enunciation) from your review of their last recording. \
+Make every part of the session work on the lessons from that review, most important first. Use the exercises you prescribed, \
+cut down to fit the time. Write directly to the student, in plain warm language, with physical cues they can feel. \
+No numbers or measurements.
+
+Your review of their last recording (%s):
+%s
+
+The passage they read:
+\"\"\"%s\"\"\"
+"""
+
+def plan_next(take_id):
+    r = q("SELECT * FROM takes WHERE id=?", (take_id,), one=True)
+    if not r or not r["feedback"]: return
+    fb = json.loads(r["feedback"])
+    review = CITE.sub(lambda m: "'%s'" % m[1], json.dumps({k: fb.get(k) for k in ("summary", "lessons", "priorities", "moments", "drill")}))
+    try:
+        plan = call_claude(PLANNER % (time.strftime("%b %d", time.localtime(r["ts"] / 1000)), review, (r["text"] or "")[:3000]),
+                           schema=PLAN_SCHEMA, effort="medium")
+        plan["from"] = r["id"]; plan["ts"] = r["ts"]
+        q("UPDATE takes SET plan=? WHERE id=?", (json.dumps(plan), take_id))
+    except Exception:
+        traceback.print_exc()
 
 def worker():
     while True:
         tid = jobs.get()
-        try: analyze(tid)
+        try:
+            if isinstance(tid, tuple): plan_next(tid[1])
+            else: analyze(tid)
         finally: jobs.task_done()
 
 # ---------- http ----------
@@ -569,6 +621,9 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     # resume anything interrupted by a restart (and takes recorded before a key was set)
+    # each person's latest review should have a plan for their next session
+    for r in q("SELECT t.id FROM takes t WHERE status='done' AND plan IS NULL AND ts=(SELECT MAX(ts) FROM takes WHERE user_id=t.user_id AND status='done')"):
+        jobs.put(("plan", r["id"]))
     for r in q("SELECT id FROM takes WHERE status IN ('queued','processing')" + (" OR status='nokey'" if coach_ready() else "") + " ORDER BY ts"):
         jobs.put(r["id"])
     threading.Thread(target=worker, daemon=True).start()
