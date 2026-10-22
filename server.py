@@ -5,12 +5,14 @@ Identity comes from the exe.dev proxy (X-ExeDev-UserID / X-ExeDev-Email).
 
 Coach pipeline: faster-whisper word timestamps -> Praat (parselmouth) pitch and
 loudness per word -> an LLM reads the passage, transcript and measurements.
-  COACH=claude (default)  Claude via the exe.dev LLM gateway; reads measurements, not audio
-  COACH=gemini            Gemini, which also listens to the audio itself; needs GEMINI_API_KEY
+With GEMINI_API_KEY set, Gemini listens to the audio and gets the measurements as
+supporting evidence, trying GEMINI_MODELS in order (quota or overload -> next one).
+If none answer, or there's no key, Claude reads the measurements instead (it can't
+take audio). COACH=claude skips Gemini.
 
+  GEMINI_MODELS    default gemini-4-argon,gemini-3.8-flash,gemini-3.6-flash
   CLAUDE_MODEL     default claude-opus-5-5
   ANTHROPIC_BASE_URL  default https://llm.int.exe.xyz (exe.dev gateway, no key needed)
-  GEMINI_MODEL     default gemini-4-argon
   DATA_DIR         default ~/voice-data
   PORT             default 8000
   DAILY_LIMIT      feedback runs per person per day, default 30
@@ -25,9 +27,11 @@ for line in open(os.path.join(APP, ".env")) if os.path.exists(os.path.join(APP, 
     if k and not k.startswith("#"): os.environ.setdefault(k, v.strip().strip('"\''))
 
 DATA = os.path.expanduser(os.environ.get("DATA_DIR", "~/voice-data"))
-COACH_PROVIDER = os.environ.get("COACH", "claude")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-argon") if COACH_PROVIDER == "gemini" else os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
-def coach_ready(): return COACH_PROVIDER != "gemini" or bool(os.environ.get("GEMINI_API_KEY"))
+GEMINI_MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", "gemini-4-argon,gemini-3.8-flash,gemini-3.6-flash").split(",") if m.strip()]
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
+USE_GEMINI = bool(os.environ.get("GEMINI_API_KEY")) and os.environ.get("COACH", "") != "claude"
+MODEL = GEMINI_MODELS[0] if USE_GEMINI else CLAUDE_MODEL
+def coach_ready(): return True
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "30"))
 STATIC = {"/": "index.html", "/index.html": "index.html", "/books.json": "books.json"}
 os.makedirs(os.path.join(DATA, "audio"), exist_ok=True)
@@ -145,8 +149,13 @@ crisp consonants and fully finished word endings, and a confident, resonant voic
 Be specific and honest, like a good coach: name what actually happened, quote the words, and say exactly what to do differently. \
 Skip generic advice. Praise only what is genuinely good. For each moment, give start and end in seconds from the start of the recording."""
 
-LISTEN = """Listen to the audio itself - pitch contour, stress, rhythm, pauses, breath, resonance, articulation - not just the words. \
-A word-timestamped transcript is provided to help you place times precisely; it is machine-made, so trust your ears over it."""
+LISTEN = """Listen to the audio itself - pitch contour, stress, rhythm, pauses, breath, resonance, articulation, character - not just the words. \
+Below the audio you also get a machine transcript with Praat measurements for every word, to help you place times precisely \
+and to back up what you hear with numbers where useful:
+- st: median pitch in semitones relative to the speaker's own median; move: pitch movement within the word in semitones.
+- db: peak loudness; tail: loudness of the word's last quarter relative to its peak; gap: silence before the word; p: transcriber confidence.
+These are machine measurements and can mislead (e.g. a soft but clearly released final consonant can show a low tail). \
+Where they disagree with what you hear, trust your ears."""
 
 MEASURED = """You cannot hear the recording. Instead you get a machine transcript plus acoustic measurements for every word, \
 taken with Praat. Read them the way a coach reads a pitch trace:
@@ -161,8 +170,8 @@ Base every judgement on this evidence and cite the numbers when useful (e.g. "ne
 You cannot judge voice quality, resonance or breathiness directly; do not claim to have heard them. \
 Score articulation and endings from the tail, confidence and misread evidence."""
 
-def build_prompt(r, words, history, pros=None):
-    parts = [COACH, "\n\n", MEASURED if pros else LISTEN, "\n\nRecording: %s, %s, %.0f seconds." % (r["kind"], r["label"] or "", r["secs"] or 0)]
+def build_prompt(r, words, history, pros=None, listening=False):
+    parts = [COACH, "\n\n", LISTEN if listening else MEASURED, "\n\nRecording: %s, %s, %.0f seconds." % (r["kind"], r["label"] or "", r["secs"] or 0)]
     if r["text"]:
         parts.append("\n\nThe passage they were reading:\n\"\"\"\n%s\n\"\"\"" % r["text"])
     marks = json.loads(r["marks"] or "[]")
@@ -197,7 +206,7 @@ def call_claude(prompt):
                                       api_key=os.environ.get("ANTHROPIC_API_KEY", "implicit"), max_retries=3, timeout=600,
                                       default_headers={"anthropic-version": "2023-06-01"})  # SDK 2.x sends a date the gateway rejects
     with _claude.messages.stream(
-        model=MODEL, max_tokens=32000,
+        model=CLAUDE_MODEL, max_tokens=32000,
         thinking={"type": "adaptive"}, output_config={"effort": "high", "format": {"type": "json_schema", "schema": FEEDBACK_SCHEMA}},
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
@@ -206,7 +215,9 @@ def call_claude(prompt):
     if msg.stop_reason == "max_tokens": raise RuntimeError("Claude's review ran too long and was cut off.")
     return json.loads(next(b.text for b in msg.content if b.type == "text"))
 
-def call_gemini(prompt, audio_b64):
+class Unavailable(Exception): pass
+
+def call_gemini(model, prompt, audio_b64):
     key = os.environ.get("GEMINI_API_KEY")
     body = {
         "contents": [{"role": "user", "parts": [{"inline_data": {"mime_type": "audio/mp3", "data": audio_b64}}, {"text": prompt}]}],
@@ -214,16 +225,18 @@ def call_gemini(prompt, audio_b64):
                              "thinkingConfig": {"thinkingLevel": os.environ.get("GEMINI_THINKING", "high")}},
     }
     req = urllib.request.Request(
-        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % MODEL,
+        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model,
         data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": key})
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             with urllib.request.urlopen(req, timeout=600) as resp:
                 out = json.load(resp)
             break
         except urllib.error.HTTPError as e:
-            msg = e.read().decode(errors="replace")[:500]
-            if e.code in (429, 500, 502, 503, 504) and attempt < 2: time.sleep(10 * (attempt + 1)); continue
+            msg = e.read().decode(errors="replace")[:300]
+            if e.code == 429 or e.code == 404: raise Unavailable("%s %s" % (e.code, msg))  # no quota / no access: next model
+            if e.code >= 500 and attempt == 0: time.sleep(8); continue
+            if e.code >= 500: raise Unavailable("%s %s" % (e.code, msg))
             raise RuntimeError("Gemini %s: %s" % (e.code, msg))
     cand = (out.get("candidates") or [{}])[0]
     text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []) if not p.get("thought"))
@@ -254,15 +267,22 @@ def analyze(take_id):
             if words is not None: q("UPDATE takes SET words=? WHERE id=?", (json.dumps(words), take_id))
         hist = [json.loads(h["feedback"]) | {"ts": h["ts"]} for h in q(
             "SELECT feedback, ts FROM takes WHERE user_id=? AND status='done' AND ts<? ORDER BY ts DESC LIMIT 4", (r["user_id"], r["ts"]))][::-1]
-        if COACH_PROVIDER == "gemini":
+        pros = None
+        if words:
+            try: pros = prosody(mp3, words)
+            except Exception: traceback.print_exc()
+        fb = used = None
+        if USE_GEMINI:
             with open(mp3, "rb") as f: b64 = base64.b64encode(f.read()).decode()
-            fb = call_gemini(build_prompt(r, words, hist), b64)
-        else:
+            prompt = build_prompt(r, words, hist, pros, listening=True)
+            for m in GEMINI_MODELS:
+                try: fb, used = call_gemini(m, prompt, b64), m; break
+                except Unavailable as e: print("gemini %s unavailable: %s" % (m, e), flush=True)
+        if fb is None:
             if not words: raise RuntimeError("Couldn't transcribe this take (is anything audible?).")
-            pros = prosody(mp3, words)
-            fb = call_claude(build_prompt(r, words, hist, pros))
+            fb, used = call_claude(build_prompt(r, words, hist, pros)), CLAUDE_MODEL
         fb = snap(fb, words, r["secs"] or 1e9)
-        q("UPDATE takes SET status='done', feedback=?, model=?, analyzed=? WHERE id=?", (json.dumps(fb), MODEL, int(time.time()), take_id))
+        q("UPDATE takes SET status='done', feedback=?, model=?, analyzed=? WHERE id=?", (json.dumps(fb), used, int(time.time()), take_id))
     except Exception as e:
         traceback.print_exc()
         q("UPDATE takes SET status='error', error=? WHERE id=?", (str(e)[:500], take_id))
@@ -429,5 +449,5 @@ if __name__ == "__main__":
         jobs.put(r["id"])
     threading.Thread(target=worker, daemon=True).start()
     port = int(os.environ.get("PORT", "8000"))
-    print("voice server on :%d, coach %s (%s)%s" % (port, COACH_PROVIDER, MODEL, "" if coach_ready() else " - NO KEY"), flush=True)
+    print("voice server on :%d, coach: %s" % (port, " -> ".join((GEMINI_MODELS if USE_GEMINI else []) + [CLAUDE_MODEL])), flush=True)
     ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()

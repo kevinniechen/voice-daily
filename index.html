@@ -336,7 +336,9 @@ function feedbackPanel(t, audio, open) {
       f.strengths?.length ? [h("h4", {}, "Working well"), h("ul", {}, f.strengths.map(p => h("li", {}, p)))] : null,
       f.moments?.length ? [h("h4", {}, "Moment by moment"), ...f.moments.map(m => moment(m, audio))] : null,
       f.drill ? [h("h4", {}, "Tomorrow’s drill"), h("p", {}, f.drill)] : null,
-      h("button", { class: "linkbtn", type: "button", onclick: async () => { if (confirm("Ask the coach for a fresh review of this take?")) paint(await api.analyze(t.id)); } }, "Re-review"));
+      h("div", { class: "bar", style: "margin-top:6px" },
+        h("button", { class: "linkbtn", type: "button", onclick: async () => { if (confirm("Ask the coach for a fresh review of this take?")) paint(await api.analyze(t.id)); } }, "Re-review"),
+        t.model ? h("span", { class: "note" }, "Reviewed by " + t.model + (t.model.startsWith("gemini") ? ", listening to the audio" : ", from pitch and timing measurements")) : null));
     el.append(h("details", { class: "fbd", open: !!open }, h("summary", {}, "Coach feedback"), body));
   };
   paint.el = el; paint(t);
