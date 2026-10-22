@@ -183,6 +183,12 @@ body.lesson-mode .wrap{padding-top:calc(4px + env(safe-area-inset-top,0px));padd
 .dock{position:fixed;left:0;right:0;bottom:0;z-index:8;background:linear-gradient(to top,var(--bg) 78%,transparent);
   padding:18px 16px calc(14px + env(safe-area-inset-bottom,0px));display:flex;justify-content:center}
 .dock > *{width:100%;max-width:608px}
+.stage{position:relative;display:grid;gap:8px}
+.stage-wave{position:absolute;left:-16px;right:-16px;top:-17px;height:110px;opacity:0;transition:opacity .35s ease;pointer-events:none}
+.stage.on .stage-wave{opacity:1}
+.inline-rec .stage-wave{top:-16px;height:96px}
+.stage .dock-row,.stage .cap{position:relative}
+.big-btn.hide{visibility:hidden}
 .dock-row{display:grid;grid-template-columns:1fr auto 1fr;align-items:end;gap:8px}
 .dock-side{display:flex;align-items:center;justify-content:flex-start;padding-bottom:30px}
 .dock-mid{display:grid;justify-items:center;gap:8px}
@@ -419,6 +425,12 @@ const recorder = {
     const type = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
     this.mr = new MediaRecorder(this.stream, type ? { mimeType: type } : undefined);
     this.chunks = [];
+    try {   // a level meter so the waves can move with your voice
+      this.actx = new (window.AudioContext || window.webkitAudioContext)();
+      this.an = this.actx.createAnalyser(); this.an.fftSize = 1024;
+      this.actx.createMediaStreamSource(this.stream).connect(this.an);
+      this.buf = new Float32Array(this.an.fftSize);
+    } catch { this.an = null; }
     this.mr.ondataavailable = e => e.data.size && this.chunks.push(e.data);
     this.mr.start(250);
   },
@@ -427,6 +439,8 @@ const recorder = {
       if (!this.mr) return res(null);
       this.mr.onstop = () => {
         this.stream.getTracks().forEach(t => t.stop());
+        try { this.actx && this.actx.close(); } catch {}
+        this.an = null;
         res(new Blob(this.chunks, { type: this.mr.mimeType || "audio/webm" }));
         this.mr = null;
       };
@@ -434,6 +448,13 @@ const recorder = {
     });
   },
   get live() { return !!this.mr; },
+  /* loudness right now, 0..1 */
+  level() {
+    if (!this.an) return 0;
+    this.an.getFloatTimeDomainData(this.buf);
+    let sum = 0; for (const v of this.buf) sum += v * v;
+    return Math.min(1, Math.sqrt(sum / this.buf.length) * 7);
+  },
 };
 
 const api = {
@@ -527,23 +548,27 @@ function makeRecorder(kind, meta, onSaved, onStart, onChange) {
   return r;
 }
 const recLabel = (r, again) => r.state === "live" ? "Stop · " + fmt(r.elapsed) : r.state === "saving" ? "Saving…" : again ? "Record again" : "Record";
-/* A standalone round mic (Practice): tap to record, tap to stop. */
+/* The same voice stage inline (Practice): record, waves while the coach writes notes, then onSaved with the graded take. */
 function recWidget(kind, meta, onSaved, onStart) {
-  const btn = h("button", { class: "big-btn mic sm", type: "button", "aria-label": "Start recording" });
-  const cap = h("div", { class: "cap" }, "Tap to record");
-  let used = false;
-  const r = makeRecorder(kind, meta, saved => { used = true; if (!QUICK[kind] && !r.msg) cap.textContent = "Saved. Your coach’s notes appear below in a minute or two."; onSaved && onSaved(saved); }, onStart, () => {
-    const live = r.state === "live";
-    btn.replaceChildren(icon(live ? "stop" : "mic")); btn.classList.toggle("live", live); btn.disabled = r.state === "saving";
-    btn.setAttribute("aria-label", live ? "Stop recording" : "Start recording");
-    cap.textContent = r.msg || (live ? "Recording · " + fmt(r.elapsed) : r.state === "saving" ? "Saving…" : used ? "Tap to record again" : "Tap to record");
-  });
-  btn.append(icon("mic")); btn.onclick = r.toggle;
-  return h("div", { class: "inline-rec" }, btn, cap);
+  const box = h("div", { class: "inline-rec" });
+  let used = false, working = false;
+  const wave = listeningWave(96, () => r.state === "live" ? recorder.level() : null);
+  const paint = () => {
+    const live = r.state === "live", busy = r.state === "saving" || working;
+    const btn = bigButton("mic sm" + (live ? " live" : ""), live ? "Stop recording" : "Start recording", r.toggle, icon(live ? "stop" : "mic"));
+    if (busy) { btn.disabled = true; btn.classList.add("hide"); }
+    box.replaceChildren(voiceStage(wave, btn, r.msg || (live ? "Recording · " + fmt(r.elapsed) : busy ? "Your coach is writing up notes" + (QUICK[kind] ? "…" : " · 1–2 min") : used ? "Tap to record again" : "Tap to record"), live || busy));
+  };
+  const r = makeRecorder(kind, meta, async saved => {
+    if (saved?.id) { working = true; paint(); await untilGraded(saved.id, () => box.isConnected); await loadTakes(); working = false; }
+    used = true; paint(); onSaved && onSaved(saved);
+  }, onStart, paint);
+  paint();
+  return box;
 }
 
 /* ---------- the "coach is listening" animation: layered waves of light flowing across, like water ---------- */
-function listeningWave(height = 120) {
+function listeningWave(height = 120, level) {
   const c = h("canvas", { class: "wave", "aria-hidden": "true", style: "height:" + height + "px" });
   const ctx = c.getContext("2d");
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -555,15 +580,19 @@ function listeningWave(height = 120) {
     [["#06b6d4", "#6366f1", "#a855f7"], 1.25, 2.05, 0.6, 3.4],
     [["#38bdf8", "#818cf8", "#22d3ee"], -1.6, 2.7, 0.42, 5.0],
   ];
-  let t0 = performance.now(), raf = 0;
+  let t0 = performance.now(), raf = 0, smooth = 0.5, gone = 0;
   const draw = now => {
-    if (!c.isConnected && now - t0 > 500) return cancelAnimationFrame(raf);
+    if (!c.isConnected) { if (!gone) gone = now; if (now - gone > 1500) return cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); return; }
+    gone = 0;
     const dpr = Math.min(devicePixelRatio || 1, 2), W = c.clientWidth || 300, H = height, mid = H / 2;
     if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     ctx.globalCompositeOperation = dark ? "screen" : "source-over";
-    const t = (now - t0) / 1000, breathe = 0.7 + 0.3 * Math.sin(t * 1.1);
+    const t = (now - t0) / 1000;
+    const live = level && level();
+    smooth += ((live == null || live === false ? 0.7 + 0.3 * Math.sin(t * 1.1) : 0.3 + Math.sqrt(live) * 1.1) - smooth) * 0.12;
+    const breathe = smooth;
     const curve = (u, freq, speed, ph) => Math.sin(u * freq * Math.PI * 2 + t * speed * 2.4 + ph) * 0.75 + Math.sin(u * freq * 4.1 + t * speed * 3.7 + ph * 1.7) * 0.25;
     for (const [cols, speed, freq, amp, ph] of ribbons) {
       const g = ctx.createLinearGradient(0, 0, W, 0);
@@ -978,18 +1007,42 @@ function dockRow(left, center, caption) {
 }
 
 /* A recording step. The mic records; when saved, a sheet shows the grade with Try again / Continue. */
+/* One voice stage for every recording: the mic; tap it and waves rise around it, moving with your voice;
+   tap stop and the same waves keep flowing while the coach writes up notes; then the result sheet rises. */
+function voiceStage(wave, button, caption, on, left) {
+  return h("div", { class: "stage" + (on ? " on" : "") }, h("div", { class: "stage-wave" }, wave),
+    h("div", { class: "dock-row" }, h("div", { class: "dock-side" }, left || ""), h("div", { class: "dock-mid" }, button), h("div", { class: "dock-side" })),
+    h("div", { class: "cap" }, caption));
+}
+/* Wait for a quick grade to come back. */
+async function untilGraded(id, alive) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 2500));
+    if (!alive()) return null;
+    let t; try { t = await api.take(id); } catch { continue; }
+    if (!["queued", "processing"].includes(t.status)) return t;
+  }
+}
 function stepRec(L, step, kind, meta, repaint, onStart) {
-  const r = makeRecorder(kind, () => ({ ...meta(), lesson_id: L.id, step }), () => { fresh = true; repaint(); }, onStart, () => repaint());
-  let fresh = false, again = false;
+  let again = false, grading = false;
+  const wave = listeningWave(110, () => r.state === "live" ? recorder.level() : null);
+  const r = makeRecorder(kind, () => ({ ...meta(), lesson_id: L.id, step }), async saved => {
+    if (QUICK[kind] && saved?.id) {
+      grading = true; repaint();
+      await untilGraded(saved.id, () => wave.isConnected || document.body.classList.contains("lesson-mode"));
+      await loadTakes(); grading = false;
+    }
+    repaint();
+  }, onStart, () => repaint());
   const has = () => lessonTakes(L, step).length > 0;
   return {
-    complete: () => has() && r.state === "idle" && !again,
+    complete: () => has() && r.state === "idle" && !again && !grading,
     control: () => {
-      const live = r.state === "live", busy = r.state === "saving";
-      const btn = bigButton("mic" + (live ? " live" : "") + (busy ? " busy" : ""), live ? "Stop recording" : "Start recording", () => { again = false; r.toggle(); }, icon(live ? "stop" : "mic"));
-      btn.disabled = busy;
-      const skip = !live && !busy ? h("button", { class: "linkbtn", type: "button", onclick: () => { if (again) { again = false; return repaint(); } repaint.skip && repaint.skip(); } }, again ? "Cancel" : "Skip") : "";
-      return dockRow(skip, btn, live ? "Recording · " + fmt(r.elapsed) : busy ? "Saving…" : r.msg || (again ? "Tap to record again" : "Tap to record"));
+      const live = r.state === "live", working = r.state === "saving" || grading;
+      const btn = bigButton("mic" + (live ? " live" : ""), live ? "Stop recording" : "Start recording", () => { again = false; r.toggle(); }, icon(live ? "stop" : "mic"));
+      if (working) { btn.disabled = true; btn.classList.add("hide"); }
+      const skip = !live && !working ? h("button", { class: "linkbtn", type: "button", onclick: () => { if (again) { again = false; return repaint(); } repaint.skip && repaint.skip(); } }, again ? "Cancel" : "Skip") : "";
+      return voiceStage(wave, btn, live ? "Recording · " + fmt(r.elapsed) : working ? "Your coach is writing up notes…" : r.msg || (again ? "Tap to record again" : "Tap to record"), live || working, skip);
     },
     sheet: (el, cont, tryAgain, last) => {
       const t = lessonTakes(L, step)[0];
@@ -997,25 +1050,20 @@ function stepRec(L, step, kind, meta, repaint, onStart) {
       const content = h("div", { class: "sheet-body" });
       const paint = t => {
         if (QUICK[t.kind]) {
-          if (t.status === "queued" || t.status === "processing") { if (!content.querySelector(".listening-anim")) content.replaceChildren(listening("Your coach is writing up notes…", 130)); return; }
-          if (t.status === "error") return content.replaceChildren(h("p", { class: "fbstate err" }, "Couldn’t grade this one: " + (t.error || "unknown error")));
+          if (t.status === "queued" || t.status === "processing") { if (!content.querySelector(".listening-anim")) content.replaceChildren(listening("Your coach is writing up notes…", 110)); return; }
+          if (t.status === "error") return content.replaceChildren(h("div", { class: "verdict" }, "Didn’t catch that"),
+            h("p", {}, /hear|audible|transcribe/i.test(t.error || "") ? "Try again a little closer to your phone." : "Something went wrong grading it. Try again in a moment."));
           const f = t.feedback || {}, g = GRADES[f.grade] || GRADES.almost;
           el.dataset.grade = f.grade || "";
           content.replaceChildren(h("div", { class: "verdict" }, g[0] + " " + g[1]), h("p", {}, rich(f.note, audio)), f.tip ? h("p", { class: "try" }, rich(f.tip, audio)) : "");
         } else {
-          content.replaceChildren(h("div", { class: "verdict" }, "✓ Saved"), h("p", {}, "Your coach’s full notes on this read will be ready when you finish the lesson."));
+          content.replaceChildren(h("div", { class: "verdict" }, "✓ Sent to your coach"), h("p", {}, "Your coach is writing up full notes on this read. They’ll be ready when you finish the lesson."));
         }
       };
       el.dataset.grade = "";
       paint(t);
-      if (QUICK[t.kind] && (t.status === "queued" || t.status === "processing")) {
-        const iv = setInterval(async () => {
-          if (!el.classList.contains("open")) return clearInterval(iv);
-          let x; try { x = await api.take(t.id); } catch { return; }
-          if (!["queued", "processing"].includes(x.status)) { clearInterval(iv); await loadTakes(); }
-          paint(x);
-        }, 3000);
-      }
+      if (QUICK[t.kind] && (t.status === "queued" || t.status === "processing"))   // e.g. reopened mid-grade
+        untilGraded(t.id, () => el.classList.contains("open")).then(async x => { if (x) { await loadTakes(); paint(x); } });
       el.replaceChildren(h("div", { class: "sheet-in" }, content, audio,
         h("div", { class: "sheet-actions" },
           h("button", { class: "btn2", type: "button", onclick: () => tryAgain(() => { again = true; }) }, "Try again"),
