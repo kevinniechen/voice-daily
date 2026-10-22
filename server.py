@@ -100,19 +100,80 @@ def audio_path(r, ext="mp3"): return os.path.join(DATA, "audio", r["user_id"], r
 jobs = queue.Queue()
 _whisper = None
 
+_whisper_lock = threading.Lock()
+def whisper():
+    global _whisper
+    try: from faster_whisper import WhisperModel
+    except ImportError: return None
+    if _whisper is None: _whisper = WhisperModel(os.environ.get("WHISPER_MODEL", "small.en"), device="cpu", compute_type="int8")
+    return _whisper
+
+def pcm_of(path):
+    """16 kHz mono floats, decoded with ffmpeg (faster-whisper's PyAV path is version-fragile). Works on a growing file too."""
+    import numpy as np
+    out = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", path, "-f", "f32le", "-ac", "1", "-ar", "16000", "-"], capture_output=True).stdout
+    return np.frombuffer(out[: len(out) // 4 * 4], np.float32)
+
+def transcribe_pcm(pcm, offset=0.0, prompt=None):
+    m = whisper()
+    if m is None or len(pcm) < 1600: return [] if m else None
+    with _whisper_lock:
+        segs, _ = m.transcribe(pcm, word_timestamps=True, vad_filter=False, beam_size=1, initial_prompt=prompt or None)
+        segs = list(segs)
+    return [{"w": w.word.strip(), "s": round(w.start + offset, 2), "e": round(w.end + offset, 2), "p": round(w.probability, 2)} for s in segs for w in (s.words or [])]
+
 def transcribe(path):
     """Word-level timestamps, or None if faster-whisper isn't installed."""
-    global _whisper
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        return None
-    if _whisper is None:
-        _whisper = WhisperModel(os.environ.get("WHISPER_MODEL", "small.en"), device="cpu", compute_type="int8")
-    import numpy as np  # decode with ffmpeg ourselves; faster-whisper's PyAV path is version-fragile
-    pcm = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", path, "-f", "f32le", "-ac", "1", "-ar", "16000", "-"], capture_output=True, check=True).stdout
-    segs, _ = _whisper.transcribe(np.frombuffer(pcm, np.float32), word_timestamps=True, vad_filter=False, beam_size=1)
-    return [{"w": w.word.strip(), "s": round(w.start, 2), "e": round(w.end, 2), "p": round(w.probability, 2)} for s in segs for w in (s.words or [])]
+    if whisper() is None: return None
+    return transcribe_pcm(pcm_of(path))
+
+# ---------- streaming: transcribe while they're still recording, so Stop only waits for the last few seconds ----------
+STREAMS = {}           # stream id -> {user, path, words, done (seconds transcribed), lock, busy, created}
+STREAM_TAIL = 2.0      # keep the newest seconds open: a word may still be in progress
+
+def last_pause(pcm, lo, hi, min_gap=0.3):
+    """Middle of the latest pause of at least min_gap seconds between lo and hi (seconds), or None."""
+    import numpy as np
+    fr = 320   # 20 ms frames at 16 kHz
+    a, b = int(lo * 16000) // fr, int(hi * 16000) // fr
+    if b - a < 10: return None
+    frames = pcm[a * fr: b * fr].reshape(-1, fr)
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+    quiet = rms < max(0.004, 0.12 * float(np.percentile(rms, 90)))
+    need, run = int(min_gap / 0.02), 0
+    for i in range(len(quiet) - 1, -1, -1):
+        run = run + 1 if quiet[i] else 0
+        if run >= need:
+            j = i + run   # walk to the end of this quiet stretch
+            while j < len(quiet) and quiet[j]: j += 1
+            return (a + (i + j) / 2) * 0.02
+    return None
+
+def stream_catch_up(st, final=False):
+    """Transcribe whole phrases as they finish: cut only at pauses, so no word is ever split between pieces."""
+    with st["lock"]:
+        try: pcm = pcm_of(st["path"])
+        except Exception: return
+        avail = len(pcm) / 16000
+        if final: cut = avail
+        else:
+            if avail - STREAM_TAIL - st["done"] < 5: return
+            cut = last_pause(pcm, st["done"] + 1, avail - 0.5)
+            if cut is None: return   # no pause yet: wait for one
+        if cut - st["done"] < 0.3: return
+        context = " ".join(w["w"] for w in st["words"][-40:])
+        new = transcribe_pcm(pcm[int(st["done"] * 16000): int(cut * 16000)], st["done"], context)
+        if new is None: st["broken"] = True; return
+        st["words"] += new; st["done"] = cut
+
+def stream_kick(st):
+    if st["busy"]: return
+    st["busy"] = True
+    def run():
+        try: stream_catch_up(st)
+        except Exception: traceback.print_exc()
+        finally: st["busy"] = False
+    threading.Thread(target=run, daemon=True).start()
 
 def prosody(path, words):
     """Per-word pitch and loudness from Praat, plus whole-take stats. None if parselmouth is missing."""
@@ -300,9 +361,38 @@ def call_claude(prompt, schema=None, effort="high"):
 
 class Unavailable(Exception): pass
 
+BAD_TEXT = re.compile(r"\bjson\b|standard format|just kidding|as an ai\b|output format|<\|", re.I)
+def sane(out, schema):
+    """Reject well-formed but broken answers (missing fields, empty notes, format chatter) before anyone sees them."""
+    if not isinstance(out, dict): return False
+    for k in schema.get("required", []):
+        if k not in out: return False
+    texts = []
+    def walk(v):
+        if isinstance(v, str): texts.append(v)
+        elif isinstance(v, dict): [walk(x) for x in v.values()]
+        elif isinstance(v, list): [walk(x) for x in v]
+    walk(out)
+    if any(BAD_TEXT.search(t) for t in texts): return False
+    main = out.get("note") if "grade" in schema.get("properties", {}) else out.get("summary")
+    return isinstance(main, str) and len(main.strip()) >= 30
+
+def ask_listeners(prompt, audios, schema=None):
+    """Try each listening model in order; retry a broken answer once before moving on."""
+    schema = schema or FEEDBACK_SCHEMA
+    for via, m in LISTENERS:
+        for attempt in range(2):
+            try: out = (call_openrouter if via == "openrouter" else call_gemini)(m, prompt, audios, schema)
+            except Unavailable as e: print("%s %s unavailable: %s" % (via, m, e), flush=True); break
+            except (ValueError, KeyError) as e: print("%s %s unreadable answer: %s" % (via, m, e), flush=True); continue
+            if sane(out, schema): return out, m.split("/")[-1]
+            print("%s %s gave a broken answer (attempt %d): %s" % (via, m, attempt + 1, json.dumps(out)[:300]), flush=True)
+    return None, None
+
 def call_openrouter(model, prompt, audio_b64, schema=None):
     body = {
         "model": model, "max_tokens": 32000, "reasoning": {"effort": "high"},
+        "provider": {"require_parameters": True},   # only providers that honour response_format; others let the model ramble
         "messages": [{"role": "user", "content": [
             *[{"type": "input_audio", "input_audio": {"data": a, "format": "mp3"}} for a in ([audio_b64] if isinstance(audio_b64, str) else audio_b64)],
             {"type": "text", "text": prompt}]}],
@@ -350,9 +440,32 @@ def call_gemini(model, prompt, audio_b64, schema=None):
 
 CITE = re.compile(r"\[([^\]]+)\]\(\s*(\d+(?:\.\d+)?)\s*(?:[-\u2013]\s*(\d+(?:\.\d+)?))?\s*s?\s*\)")
 
+_norm = lambda w: re.sub(r"[^a-z0-9']", "", w.lower())
+def find_span(quote, words):
+    """Where in the transcript was this quote said? Best-matching run of words, or None."""
+    qt = [x for x in map(_norm, quote.split()) if x]
+    if not qt or not words: return None
+    ws = [_norm(w["w"]) for w in words]
+    best, at = 0, None
+    for i in range(len(ws)):
+        hit = sum(1 for j, x in enumerate(qt) if i + j < len(ws) and ws[i + j] == x)
+        if hit > best: best, at = hit, i
+    if best < max(1, (len(qt) + 1) // 2): return None
+    end = min(at + len(qt), len(words)) - 1
+    return words[at]["s"], words[end]["e"]
+
+def link_quotes(text, words):
+    """Turn quotes the model marked without times ({{like this}}) into [like this](start-end) using the transcript."""
+    def one(m):
+        q = m[1].strip().strip(",.;:!?").strip()
+        sp = find_span(q, words)
+        return "[%s](%.1f-%.1f)" % (q, sp[0], sp[1]) if sp else "\u201c%s\u201d" % q
+    return re.sub(r"\{\{([^{}]+)\}\}", one, text or "")
+
 def snap(fb, words, dur):
     """Keep moment and [words](start-end) link times inside the recording; sort moments."""
     def fix(text):
+        text = link_quotes(text, words)
         def one(m):
             s0 = max(0.0, min(float(m[2]), dur)); e0 = max(s0, min(float(m[3] or s0 + 1.5), dur))
             return "[%s](%.1f-%.1f)" % (m[1], s0, e0)
@@ -393,9 +506,7 @@ def analyze(take_id):
         if LISTENERS:
             with open(mp3, "rb") as f: b64 = base64.b64encode(f.read()).decode()
             prompt = build_prompt(r, words, hist, pros, listening=True)
-            for via, m in LISTENERS:
-                try: fb, used = (call_openrouter if via == "openrouter" else call_gemini)(m, prompt, b64), m.split("/")[-1]; break
-                except Unavailable as e: print("%s %s unavailable: %s" % (via, m, e), flush=True)
+            fb, used = ask_listeners(prompt, b64)
         if fb is None:
             if not words: raise RuntimeError("Couldn't transcribe this take (is anything audible?).")
             fb, used = call_claude(build_prompt(r, words, hist, pros)), CLAUDE_MODEL
@@ -411,7 +522,7 @@ def analyze(take_id):
 GRADE_SCHEMA = _obj({
     "grade": {"type": "string", "enum": ["got_it", "almost", "not_yet"]},
     "note": {"type": "string", "description": "1-2 sentences on what you heard, with linked examples [words](start-end)."},
-    "tip": {"type": "string", "description": "The one physical adjustment for the next try (empty if got_it)."},
+    "tip": {"type": "string", "description": "One sentence: the single physical adjustment for the next try. Don't repeat the note. Empty if got_it."},
 })
 DAY = 86400
 # The curriculum: each drill is a focus. One is "current" at a time; pass it in lessons on PASS_DAYS different days and it
@@ -448,9 +559,7 @@ def quick_grade(r, mp3, words, task, past, ref_mp3=None):
     for f in ([ref_mp3] if ref_mp3 else []) + [mp3]:
         with open(f, "rb") as fh: audios.append(base64.b64encode(fh.read()).decode())
     fb = used = None
-    for via, m in LISTENERS:
-        try: fb, used = (call_openrouter if via == "openrouter" else call_gemini)(m, prompt, audios, GRADE_SCHEMA), m.split("/")[-1]; break
-        except Unavailable as e: print("%s %s unavailable: %s" % (via, m, e), flush=True)
+    fb, used = ask_listeners(prompt, audios, GRADE_SCHEMA)
     if fb is None:
         if not pros: raise RuntimeError("Couldn't hear this attempt (is anything audible?).")
         if ref_mp3:
@@ -461,6 +570,7 @@ def quick_grade(r, mp3, words, task, past, ref_mp3=None):
         fb, used = call_claude("You can't hear the audio; work from the measurements.\n\n" + prompt, schema=GRADE_SCHEMA, effort="medium"), CLAUDE_MODEL
     dur = r["secs"] or 1e9
     for k in ("note", "tip"):
+        fb[k] = link_quotes(fb.get(k, ""), words)
         fb[k] = CITE.sub(lambda m: "[%s](%.1f-%.1f)" % (m[1], max(0, min(float(m[2]), dur)), max(0, min(float(m[3] or float(m[2]) + 1.5), dur))), fb.get(k, ""))
     q("UPDATE takes SET status='done', feedback=?, model=?, analyzed=? WHERE id=?", (json.dumps(fb), used, int(time.time()), r["id"]))
     return fb
@@ -833,6 +943,25 @@ class H(BaseHTTPRequestHandler):
             IMPORT_TOKENS[tok] = (me["id"], time.time() + 1800)
             return self.send(200, {"token": tok})
         if p == "/api/takes": return self.save_take(me)
+        if p == "/api/stream":
+            for k in [k for k, v in STREAMS.items() if v["created"] < time.time() - 3600]:
+                try: os.remove(STREAMS.pop(k)["path"])
+                except OSError: pass
+            sid = secrets.token_hex(12)
+            os.makedirs(os.path.join(DATA, "streams"), exist_ok=True)
+            STREAMS[sid] = {"user": me["id"], "path": os.path.join(DATA, "streams", sid + ".part"), "words": [], "done": 0.0,
+                            "lock": threading.Lock(), "busy": False, "created": time.time()}
+            open(STREAMS[sid]["path"], "wb").close()
+            return self.send(200, {"id": sid})
+        m = re.fullmatch(r"/api/stream/([0-9a-f]{24})", p)
+        if m:
+            st = STREAMS.get(m[1])
+            if not st or st["user"] != me["id"]: return self.send(409, {"error": "unknown stream"})
+            try: chunk = self.body(16 << 20)
+            except ValueError: return self.send(413, {"error": "too large"})
+            with open(st["path"], "ab") as f: f.write(chunk)
+            stream_kick(st)
+            return self.send(200, {"ok": True, "transcribed": round(st["done"], 1)})
         if p == "/api/lesson":  # today's lesson: made once per date, then fixed
             try: a = json.loads(self.body(1 << 16))
             except Exception: return self.send(400, {"error": "bad request"})
@@ -860,6 +989,13 @@ class H(BaseHTTPRequestHandler):
         except Exception: meta = {}
         try: raw = self.body()
         except ValueError: return self.send(413, {"error": "recording too large"}, headers=extra)
+        st = None
+        sid = self.headers.get("X-Stream-Id")
+        if sid:  # most of the recording already arrived while they spoke; this body is the last few seconds
+            st = STREAMS.pop(sid, None)
+            if not st or st["user"] != me["id"]: return self.send(409, {"error": "unknown stream"}, headers=extra)
+            with open(st["path"], "ab") as f: f.write(raw)
+            with open(st["path"], "rb") as f: raw = f.read()
         if len(raw) < 1000: return self.send(400, {"error": "empty recording"}, headers=extra)
         if meta.get("ts"):  # same take sent twice (re-import, retry): keep the first
             dup = q("SELECT * FROM takes WHERE user_id=? AND ts=?", (me["id"], int(meta["ts"])), one=True)
@@ -879,12 +1015,18 @@ class H(BaseHTTPRequestHandler):
         try: secs = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio_path(row)], capture_output=True, text=True).stdout.strip())
         except ValueError: secs = float(meta.get("secs") or 0)
         ts = int(meta.get("ts") or time.time() * 1000)
+        words = None
+        if st:
+            try: stream_catch_up(st, final=True); words = None if st.get("broken") else st["words"]
+            except Exception: traceback.print_exc()
+            try: os.remove(st["path"])
+            except OSError: pass
         drill = q("SELECT id FROM drills WHERE id=? AND user_id=?", (meta.get("drill_id"), me["id"]), one=True) if meta.get("drill_id") else None
         les = q("SELECT id FROM lessons WHERE id=? AND user_id=? AND status='active'", (meta.get("lesson_id"), me["id"]), one=True) if meta.get("lesson_id") else None
-        q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status,drill_id,lesson_id,step) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status,drill_id,lesson_id,step,words) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           (tid, me["id"], "drill" if drill else meta.get("kind", "daily"), meta.get("label", ""), ts, round(secs, 2), meta.get("text", ""),
            json.dumps(meta.get("shadow") if meta.get("kind") == "shadow" else meta.get("marks", [])), mime, "queued", drill["id"] if drill else None,
-           les["id"] if les else None, meta.get("step") if les else None))
+           les["id"] if les else None, meta.get("step") if les else None, json.dumps(words) if words is not None else None))
         self.queue_if_allowed(me, tid)
         return self.send(200, take_json(q("SELECT * FROM takes WHERE id=?", (tid,), one=True)), headers=extra)
 

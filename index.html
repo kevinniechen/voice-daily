@@ -445,10 +445,20 @@ const api = {
   lessons: async () => { try { const r = await fetch("api/lessons"); return r.ok ? await r.json() : []; } catch { return []; } },
   lesson: async (date, page) => { const r = await fetch("api/lesson", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, page }) }); if (!r.ok) throw new Error(r.status); return r.json(); },
   done: async id => (await fetch("api/lesson/" + encodeURIComponent(id) + "/done", { method: "POST" })).json(),
+  streamStart: async () => { const r = await fetch("api/stream", { method: "POST" }); if (!r.ok) throw new Error(r.status); return (await r.json()).id; },
+  streamChunk: (sid, blob) => fetch("api/stream/" + sid, { method: "POST", body: blob }).then(r => r.ok),
   async upload(t) {
+    if (t.sid) {
+      try { return await this.send(t, t.tail, t.sid); }
+      catch (e) { if (!/unknown stream|409/.test(e.message)) throw e; }   // the stream went missing: send it all
+    }
+    return this.send(t, t.blob);
+  },
+  async send(t, body, sid) {
     const meta = { kind: t.kind, label: t.label, ts: t.ts, secs: t.secs, text: t.text || "", marks: t.marks || [], drill_id: t.drill_id, lesson_id: t.lesson_id, step: t.step, shadow: t.shadow };
-    const r = await fetch("api/takes", { method: "POST", body: t.blob,
-      headers: { "Content-Type": t.blob.type || "audio/webm", "X-Take-Meta": encodeURIComponent(JSON.stringify(meta)) } });
+    const headers = { "Content-Type": t.blob.type || "audio/webm", "X-Take-Meta": encodeURIComponent(JSON.stringify(meta)) };
+    if (sid) headers["X-Stream-Id"] = sid;
+    const r = await fetch("api/takes", { method: "POST", body, headers });
     const out = await r.json();
     if (!r.ok) throw new Error(out.error || "upload failed");
     return out;
@@ -489,12 +499,23 @@ function makeRecorder(kind, meta, onSaved, onStart, onChange) {
       try { await recorder.start(); }
       catch { r.msg = "Microphone blocked. Allow it in your browser’s site settings, then try again."; return onChange(); }
       r.t0 = Date.now(); r.state = "live"; r.msg = ""; onStart && onStart(r.t0);
+      /* send audio as it's recorded, so the server transcribes while you talk */
+      r.sid = null; r.sent = 0; r.sending = null;
+      api.streamStart().then(id => r.sid = id).catch(() => {});
+      r.flush = setInterval(() => {
+        const n = recorder.chunks.length;
+        if (!r.sid || r.sending || n <= r.sent) return;
+        r.sending = api.streamChunk(r.sid, new Blob(recorder.chunks.slice(r.sent, n))).then(ok => { if (ok) r.sent = n; else r.sid = null; })
+          .catch(() => { r.sid = null; }).finally(() => { r.sending = null; });
+      }, 4000);
       iv = setInterval(onChange, 500); return onChange();
     }
-    clearInterval(iv); r.state = "saving"; onChange();
+    clearInterval(iv); clearInterval(r.flush); r.state = "saving"; onChange();
     const blob = await recorder.stop();
+    if (r.sending) await r.sending;
     if (!blob) { r.state = "idle"; return onChange(); }
     const take = { id: kind + ":" + Date.now(), kind, ts: Date.now(), secs: Math.round(r.elapsed), blob, ...meta() };
+    if (r.sid) { take.sid = r.sid; take.tail = new Blob(recorder.chunks.slice(r.sent), { type: blob.type }); }
     let saved = take;
     try { saved = await api.upload(take); }
     catch (e) { await idb.put(take); r.msg = "Couldn’t reach the server, so this take is saved on this device and will upload next time. (" + e.message + ")"; }
@@ -597,7 +618,7 @@ function feedbackPanel(t, audio, open, onDone) {
     el.innerHTML = "";
     if (t.status === "queued" || t.status === "processing") {
       waited = true;
-      el.append(listening(QUICK[t.kind] ? "Your coach is listening…" : "Your coach is listening and writing notes · 1–2 minutes", 84));
+      el.append(listening(QUICK[t.kind] ? "Your coach is writing up notes…" : "Your coach is writing up notes · 1–2 minutes", 84));
       return watch(t.id, paint);
     }
     if (waited && onDone) { waited = false; return onDone(t); }
@@ -976,7 +997,7 @@ function stepRec(L, step, kind, meta, repaint, onStart) {
       const content = h("div", { class: "sheet-body" });
       const paint = t => {
         if (QUICK[t.kind]) {
-          if (t.status === "queued" || t.status === "processing") { if (!content.querySelector(".listening-anim")) content.replaceChildren(listening("Your coach is listening…", 130)); return; }
+          if (t.status === "queued" || t.status === "processing") { if (!content.querySelector(".listening-anim")) content.replaceChildren(listening("Your coach is writing up notes…", 130)); return; }
           if (t.status === "error") return content.replaceChildren(h("p", { class: "fbstate err" }, "Couldn’t grade this one: " + (t.error || "unknown error")));
           const f = t.feedback || {}, g = GRADES[f.grade] || GRADES.almost;
           el.dataset.grade = f.grade || "";
