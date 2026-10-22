@@ -79,7 +79,8 @@ for ddl in (  # added after launch; each is a no-op once applied. Tables first, 
         "ALTER TABLE drills ADD COLUMN flags INTEGER DEFAULT 1",      # how many reviews raised this habit
         "ALTER TABLE users ADD COLUMN guest_hash TEXT",               # guests: sha256 of their device cookie
         "ALTER TABLE users ADD COLUMN ip TEXT",
-        "CREATE TABLE sessions(token_hash TEXT PRIMARY KEY, user_id TEXT, created INTEGER)"):  # device sign-ins (guests, Apple)
+        "CREATE TABLE sessions(token_hash TEXT PRIMARY KEY, user_id TEXT, created INTEGER)",
+        "ALTER TABLE users ADD COLUMN src TEXT"):                       # where they came from: utm tags, referrer (first touch)  # device sign-ins (guests, Apple)
     try: db.execute(ddl)
     except sqlite3.OperationalError: pass
 
@@ -311,8 +312,19 @@ def when(ts, now_ts):
     return ("%.0f minutes earlier today" % (hrs * 60) if hrs < 1 else
             "%.0f hours earlier today" % hrs if hrs < 12 else time.strftime("%b %d", time.localtime(ts / 1000)))
 
+GOALS = {"work": "sound confident and clear at work: meetings, calls, interviews",
+         "stage": "present and speak in public with presence",
+         "clarity": "be understood easily: clearer English, crisper consonants, steadier pace",
+         "perform": "read aloud and perform: audiobooks, acting, storytelling"}
+def user_goal(uid):
+    st = q("SELECT json FROM state WHERE user_id=?", (uid,), one=True)
+    g = json.loads(st["json"]).get("goal") if st else None
+    return GOALS.get(g)
+
 def build_prompt(r, words, history, pros=None, listening=False):
     parts = [COACH, "\n\n", LISTEN if listening else MEASURED, "\n\nRecording: %s, %s, %.0f seconds." % (r["kind"], r["label"] or "", r["secs"] or 0)]
+    goal = user_goal(r["user_id"])
+    if goal: parts.append("\n\nWhat they want their voice to do: " + goal + ". Prioritise what matters most for that, and say why it matters for it.")
     if r["text"]:
         parts.append("\n\nThe passage they were reading:\n\"\"\"\n%s\n\"\"\"" % r["text"])
     marks = json.loads(r["marks"] or "[]")
@@ -554,7 +566,8 @@ def quick_grade(r, mp3, words, task, past, ref_mp3=None):
     if words:
         try: pros = prosody(mp3, words)
         except Exception: traceback.print_exc()
-    prompt = "\n\n".join(filter(None, [GRADE_INTRO, task,
+    goal = user_goal(r["user_id"])
+    prompt = "\n\n".join(filter(None, [GRADE_INTRO, task, ("Their goal: " + goal + ".") if goal else "",
         "Their earlier attempts (oldest first):\n" + "\n".join("- %s: %s. %s" % (
             time.strftime("%b %d", time.localtime(a["ts"] / 1000)), a["grade"], CITE.sub(lambda m: m[1], a["note"])) for a in past) if past else "",
         ("Student recording" + (" (the second audio)" if ref_mp3 else "") + ": transcript with per-word measurements "
@@ -769,6 +782,7 @@ def merge_user(src, dst):
     """A guest signed in: move their recordings, focuses, lessons and practice days into the account."""
     if src == dst: return
     for t in ("takes", "drills", "lessons"): q("UPDATE %s SET user_id=? WHERE user_id=?" % t, (dst, src))
+    q("UPDATE users SET src=COALESCE(src,(SELECT src FROM users WHERE id=?)), created=MIN(created,(SELECT created FROM users WHERE id=?)) WHERE id=?", (src, src, dst))
     q("DELETE FROM sessions WHERE user_id=?", (src,))
     a, b = os.path.join(DATA, "audio", src), os.path.join(DATA, "audio", dst)
     if os.path.isdir(a):
@@ -848,16 +862,48 @@ class H(BaseHTTPRequestHandler):
         self.start_session(uid)
         return self.send(200, {"id": uid, "email": email, "guest": False})
 
+    def stats(self):
+        """The ad-test funnel, by where people came from. Only the owner (OWNER_EMAIL, an exe.dev login) can see it."""
+        owner = os.environ.get("OWNER_EMAIL", "kevin@8vc.com")
+        if self.headers.get("X-ExeDev-Email") != owner:
+            return self.send(302, b"", "text/plain", {"Location": "/__exe.dev/login?redirect=/stats"}) if not self.headers.get("X-ExeDev-Email") else self.send(403, "not yours", "text/plain")
+        since = int(time.time()) - 30 * 86400
+        rows = q("""SELECT u.id, u.created, u.src,
+            (SELECT COUNT(*) FROM takes t WHERE t.user_id=u.id) recs,
+            (SELECT COUNT(*) FROM lessons l WHERE l.user_id=u.id AND l.status='done') lessons,
+            (SELECT COUNT(DISTINCT date(t.ts/1000,'unixepoch')) FROM takes t WHERE t.user_id=u.id) days
+            FROM users u WHERE u.created>? ORDER BY u.created DESC""", (since,))
+        by = {}
+        for r in rows:
+            sv = json.loads(r["src"]) if r["src"] else {}
+            key = sv.get("utm_source") or (("ref: " + sv["ref"]) if sv.get("ref") else None) or (sv.get("referrer") and "link: " + sv["referrer"]) or "direct"
+            key += (" / " + sv["utm_campaign"]) if sv.get("utm_campaign") else ""
+            b = by.setdefault(key, [0, 0, 0, 0])
+            b[0] += 1; b[1] += r["recs"] > 0; b[2] += r["lessons"] > 0; b[3] += r["days"] > 1
+        pct = lambda a, n: "%d <small>(%d%%)</small>" % (a, round(100 * a / n)) if n else "0"
+        trs = "".join("<tr><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (k.replace("<", "&lt;"), v[0], pct(v[1], v[0]), pct(v[2], v[0]), pct(v[3], v[0]))
+                      for k, v in sorted(by.items(), key=lambda kv: -kv[1][0]))
+        tot = [sum(v[i] for v in by.values()) for i in range(4)]
+        cost = q("SELECT COUNT(*) c FROM takes WHERE analyzed>?", (since,), one=True)["c"]
+        html = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Stats · Ten Minute Voice</title>
+<style>body{font:15px/1.5 system-ui;margin:0;padding:24px 16px;background:#f6f7f9;color:#16202c}main{max-width:760px;margin:auto}table{border-collapse:collapse;width:100%%;background:#fff;border:1px solid #dfe3e9;border-radius:12px;overflow:hidden}
+th,td{padding:10px 12px;text-align:right;border-bottom:1px solid #eef0f3;font-variant-numeric:tabular-nums}th:first-child,td:first-child{text-align:left}th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#5f6b7a}small{color:#5f6b7a}p{color:#5f6b7a}</style>
+<main><h1>Last 30 days</h1><p>New people by where they came from. Tag ad links like <code>?utm_source=tiktok&amp;utm_campaign=confident-calls</code>.</p>
+<table><tr><th>Source</th><th>Started</th><th>Recorded</th><th>Finished a lesson</th><th>Came back another day</th></tr>%s
+<tr><td><b>All</b></td><td><b>%d</b></td><td><b>%s</b></td><td><b>%s</b></td><td><b>%s</b></td></tr></table>
+<p>%d coach reviews and grades in this period (roughly 3–15¢ each).</p></main>""" % (trs, tot[0], pct(tot[1], tot[0]), pct(tot[2], tot[0]), pct(tot[3], tot[0]), cost)
+        return self.send(200, html, "text/html; charset=utf-8")
+
     def client_ip(self):
         return (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[-1].strip()  # the proxy appends the real one; earlier entries are client-supplied
 
-    def new_guest(self):
+    def new_guest(self, src=None):
         ip = self.client_ip()
         n = q("SELECT COUNT(*) c FROM users WHERE ip=? AND created>?", (ip, int(time.time()) - 86400), one=True)["c"]
         if n >= GUESTS_PER_IP_DAY: return None
         tok = secrets.token_urlsafe(32)
         gid = "guest-" + secrets.token_hex(8)
-        q("INSERT INTO users(id,email,created,ip) VALUES(?,?,?,?)", (gid, "", int(time.time()), ip))
+        q("INSERT INTO users(id,email,created,ip,src) VALUES(?,?,?,?,?)", (gid, "", int(time.time()), ip, json.dumps(src)[:1000] if src else None))
         self.start_session(gid)
         return {"id": gid, "email": "", "guest": True}
 
@@ -913,6 +959,7 @@ class H(BaseHTTPRequestHandler):
                     return self.send(200, f.read().replace("{{CONTACT}}", os.environ.get("CONTACT_EMAIL", "the contact address on our App Store page")), "text/html; charset=utf-8")
             return self.send_file(os.path.join(APP, STATIC.get(p, p.lstrip("/"))),
                                   cache="public, max-age=86400" if p.startswith("/audio/") else "no-cache")
+        if p == "/stats": return self.stats()
         if not p.startswith("/api/"): return self.send(404, {"error": "not found"})
         if p == "/api/signin": return self.send(302, b"", "text/plain", {"Location": "/__exe.dev/login?redirect=/"})
         me = self.user()
@@ -991,7 +1038,10 @@ class H(BaseHTTPRequestHandler):
             self._cookie = GUEST_COOKIE + "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
             return self.send(200, {"ok": True})
         if p == "/api/guest":
-            me = self.user() or self.new_guest()
+            try: src = {k: str(v)[:120] for k, v in (json.loads(self.body(1 << 12) or b"{}").get("src") or {}).items()
+                        if k in ("utm_source", "utm_medium", "utm_campaign", "utm_content", "ref", "referrer")}
+            except Exception: src = None
+            me = self.user() or self.new_guest(src)
             return self.send(200, me) if me else self.send(429, {"error": "Too many new accounts from this network today. Try again tomorrow, or sign in."})
         me = self.user()
         if not me: return self.send(401, {"error": "login required"})

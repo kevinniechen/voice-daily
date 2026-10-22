@@ -161,7 +161,7 @@ footer a{color:inherit}
 .focus .lbl{font:600 11px/1.3 var(--ui);text-transform:uppercase;letter-spacing:.05em;color:var(--accent)}
 .focus small{color:var(--muted);font-size:12px}
 /* Lesson mode: full screen, like Speak */
-body.lesson-mode header, body.lesson-mode .tabs{display:none}
+body.lesson-mode header, body.lesson-mode .tabs, body.lesson-mode footer{display:none}
 body.lesson-mode .wrap{padding-top:calc(4px + env(safe-area-inset-top,0px));padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))}
 .ltop{position:sticky;top:0;z-index:6;display:flex;align-items:center;gap:12px;padding:10px 0 14px;background:var(--bg)}
 .ltop .lbar{flex:1;margin:0}
@@ -305,6 +305,12 @@ details.older{margin:8px 0}
 details.older > summary{cursor:pointer;font-size:14px;color:var(--muted);padding:4px 0}
 h3.sec{font:600 15px/1.3 var(--ui);margin:20px 0 10px}
 h4.sub{font:600 12px/1.3 var(--ui);text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:16px 0 8px}
+.welcome{display:grid;gap:10px;padding-top:4vh}
+.welcome h1{font:800 34px/1.15 var(--ui);margin:0;letter-spacing:-.02em}
+.welcome-wave{margin:0 -16px 8px}
+.ticks{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:10px;font-size:16px}
+.ticks li::before{content:"✓";color:var(--ok);font-weight:700;margin-right:10px}
+.btn2.share{margin:12px 0 4px}
 .consent{position:fixed;inset:0;z-index:20;background:rgba(10,14,20,.45);display:flex;align-items:flex-end;justify-content:center;opacity:0;transition:opacity .25s}
 .consent.open{opacity:1}
 .consent-in{background:var(--surface);width:100%;max-width:640px;border-radius:22px 22px 0 0;padding:24px 20px calc(18px + env(safe-area-inset-bottom,0px));
@@ -519,6 +525,18 @@ function sessionOf(t) {
   const same = TAKES.filter(x => x.kind === "daily" && dayKey(x.ts) === dayKey(t.ts));
   return same.length > 1 ? "Session " + (same.filter(x => x.ts <= t.ts).length) : "";
 }
+/* Where this person came from (ad tags, a friend's share link, another site), remembered from their first visit. */
+function firstTouch() {
+  let src = store.get("src", null);
+  if (!src) {
+    const p = new URLSearchParams(location.search); src = {};
+    for (const k of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "ref"]) if (p.get(k)) src[k] = p.get(k);
+    try { const r = document.referrer && new URL(document.referrer).host; if (r && r !== location.host) src.referrer = r; } catch {}
+    store.set("src", src);
+  }
+  return src;
+}
+
 /* ---------- running inside the iOS app (Capacitor): Sign in with Apple, daily reminders ---------- */
 const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
 const plugin = name => window.Capacitor?.Plugins?.[name];
@@ -619,54 +637,55 @@ function recWidget(kind, meta, onSaved, onStart) {
 }
 
 /* ---------- the "coach is listening" animation: layered waves of light flowing across, like water ---------- */
+const RIBBONS = [   /* colours across, speed, waves across the width, height (fraction of half-height), phase */
+  [["#2563eb", "#3b82f6", "#06b6d4"], 0.9, 1.15, 0.95, 0.0],
+  [["#7c3aed", "#4f46e5", "#0ea5e9"], -0.7, 1.55, 0.75, 1.9],
+  [["#06b6d4", "#6366f1", "#a855f7"], 1.25, 2.05, 0.6, 3.4],
+  [["#38bdf8", "#818cf8", "#22d3ee"], -1.6, 2.7, 0.42, 5.0],
+];
+/* Ribbons of light: lens-shaped bands pinched at both ends, with fine threads riding them. */
+function drawRibbons(ctx, x0, y0, W, H, t, amp, dark) {
+  const mid = y0 + H / 2;
+  ctx.globalCompositeOperation = dark ? "screen" : "source-over";
+  const curve = (u, freq, speed, ph) => Math.sin(u * freq * Math.PI * 2 + t * speed * 2.4 + ph) * 0.75 + Math.sin(u * freq * 4.1 + t * speed * 3.7 + ph * 1.7) * 0.25;
+  for (const [cols, speed, freq, a, ph] of RIBBONS) {
+    const g = ctx.createLinearGradient(x0, 0, x0 + W, 0);
+    cols.forEach((col, i) => g.addColorStop(i / (cols.length - 1), col));
+    const top = [], bot = [];
+    for (let x = 0; x <= W; x += Math.max(2, W / 200)) {
+      const u = x / W, env = Math.pow(Math.sin(Math.PI * u), 1.6);
+      const y = curve(u, freq, speed, ph) * env * a * amp * (H * 0.46);
+      top.push([x0 + x, mid - y]); bot.push([x0 + x, mid + y * 0.35 - env * 2]);
+    }
+    ctx.beginPath(); top.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    for (let i = bot.length - 1; i >= 0; i--) ctx.lineTo(bot[i][0], bot[i][1]);
+    ctx.closePath();
+    ctx.globalAlpha = dark ? 0.32 : 0.22; ctx.fillStyle = g; ctx.fill();
+    for (let k = 0; k < 5; k++) {
+      const f = 1 - k * 0.17;
+      ctx.beginPath();
+      top.forEach(([x, y], i) => { const yy = mid - (mid - y) * f; i ? ctx.lineTo(x, yy) : ctx.moveTo(x, yy); });
+      ctx.globalAlpha = (dark ? 0.75 : 0.6) * (1 - k * 0.16); ctx.lineWidth = (k ? 0.9 : 2) * Math.max(1, H / 120); ctx.strokeStyle = g; ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+}
 function listeningWave(height = 120, level) {
   const c = h("canvas", { class: "wave", "aria-hidden": "true", style: "height:" + height + "px" });
   const ctx = c.getContext("2d");
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-  /* ribbons: colours across, speed, waves across the width, height (fraction of half-height), phase */
-  const ribbons = [
-    [["#2563eb", "#3b82f6", "#06b6d4"], 0.9, 1.15, 0.95, 0.0],
-    [["#7c3aed", "#4f46e5", "#0ea5e9"], -0.7, 1.55, 0.75, 1.9],
-    [["#06b6d4", "#6366f1", "#a855f7"], 1.25, 2.05, 0.6, 3.4],
-    [["#38bdf8", "#818cf8", "#22d3ee"], -1.6, 2.7, 0.42, 5.0],
-  ];
   let t0 = performance.now(), raf = 0, smooth = 0.5, gone = 0;
   const draw = now => {
     if (!c.isConnected) { if (!gone) gone = now; if (now - gone > 1500) return cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); return; }
     gone = 0;
-    const dpr = Math.min(devicePixelRatio || 1, 2), W = c.clientWidth || 300, H = height, mid = H / 2;
+    const dpr = Math.min(devicePixelRatio || 1, 2), W = c.clientWidth || 300, H = height;
     if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    ctx.globalCompositeOperation = dark ? "screen" : "source-over";
-    const t = (now - t0) / 1000;
-    const live = level && level();
+    const t = (now - t0) / 1000, live = level && level();
     smooth += ((live == null || live === false ? 0.7 + 0.3 * Math.sin(t * 1.1) : 0.3 + Math.sqrt(live) * 1.1) - smooth) * 0.12;
-    const breathe = smooth;
-    const curve = (u, freq, speed, ph) => Math.sin(u * freq * Math.PI * 2 + t * speed * 2.4 + ph) * 0.75 + Math.sin(u * freq * 4.1 + t * speed * 3.7 + ph * 1.7) * 0.25;
-    for (const [cols, speed, freq, amp, ph] of ribbons) {
-      const g = ctx.createLinearGradient(0, 0, W, 0);
-      cols.forEach((col, i) => g.addColorStop(i / (cols.length - 1), col));
-      const top = [], bot = [];
-      for (let x = 0; x <= W; x += 3) {
-        const u = x / W, env = Math.pow(Math.sin(Math.PI * u), 1.6);          // pinched to a point at both ends
-        const y = curve(u, freq, speed, ph) * env * amp * breathe * (H * 0.46);
-        top.push([x, mid - y]); bot.push([x, mid + y * 0.35 - env * 2]);     // a lens: full curve above, a softer echo below
-      }
-      ctx.beginPath(); top.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
-      for (let i = bot.length - 1; i >= 0; i--) ctx.lineTo(bot[i][0], bot[i][1]);
-      ctx.closePath();
-      ctx.globalAlpha = dark ? 0.32 : 0.22; ctx.fillStyle = g; ctx.fill();
-      /* silk: fine threads riding the ribbon, like light on moving water */
-      for (let k = 0; k < 5; k++) {
-        const f = 1 - k * 0.17;
-        ctx.beginPath();
-        top.forEach(([x], i) => { const y = mid - (mid - top[i][1]) * f; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-        ctx.globalAlpha = (dark ? 0.75 : 0.6) * (1 - k * 0.16); ctx.lineWidth = k ? 0.9 : 2; ctx.strokeStyle = g; ctx.stroke();
-      }
-    }
-    ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+    drawRibbons(ctx, 0, 0, W, H, t, smooth, dark);
     if (!still) raf = requestAnimationFrame(draw);
   };
   raf = requestAnimationFrame(draw);
@@ -674,6 +693,70 @@ function listeningWave(height = 120, level) {
 }
 function listening(text, height) {
   return h("div", { class: "listening-anim", role: "status" }, listeningWave(height), h("div", { class: "listening-text" }, text));
+}
+
+/* ---------- the voice report card: an image to share after a full review ---------- */
+function wrapText(ctx, text, x, y, maxW, lineH, maxLines) {
+  const words = text.split(/\s+/); let line = "", n = 0;
+  for (let i = 0; i < words.length; i++) {
+    const test = line ? line + " " + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && line) {
+      if (++n === maxLines) { while (ctx.measureText(line + "…").width > maxW) line = line.slice(0, -1); ctx.fillText(line + "…", x, y); return y + lineH; }
+      ctx.fillText(line, x, y); y += lineH; line = words[i];
+    } else line = test;
+  }
+  if (line) { ctx.fillText(line, x, y); y += lineH; }
+  return y;
+}
+async function reportImage(t) {
+  const f = t.feedback, W = 1080, H = 1920, c = document.createElement("canvas"); c.width = W; c.height = H;
+  const x = c.getContext("2d"), ui = '"Public Sans", system-ui, sans-serif', serif = '"Literata", Georgia, serif';
+  try { await document.fonts.ready; } catch {}
+  const bg = x.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, "#eef2ff"); bg.addColorStop(1, "#f8fafc"); x.fillStyle = bg; x.fillRect(0, 0, W, H);
+  drawRibbons(x, 0, 70, W, 300, 2.4, 1, false);
+  const quoted = t => (t || "").replace(/\[([^\]]+)\]\([^)]*\)/g, "“$1”").replace(/\{\{([^}]+)\}\}/g, "“$1”").replace(/[`*]/g, "");
+  x.fillStyle = "#2f54d4"; x.font = "700 34px " + ui; x.fillText("MY VOICE REPORT", 90, 450);
+  x.fillStyle = "#5f6b7a"; x.font = "500 32px " + ui; x.fillText(new Date(t.ts).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }), 90, 498);
+  const sc = SKILLS.map(([k, n]) => [n, f.scores?.[k] || 0]), avg = sc.reduce((a, [, v]) => a + v, 0) / sc.length;
+  x.fillStyle = "#16202c"; x.font = "800 140px " + ui; x.fillText(avg.toFixed(1), 84, 640);
+  x.fillStyle = "#5f6b7a"; x.font = "600 36px " + ui; x.fillText("out of 5", 92, 694);
+  let y = 790;
+  for (const [n, v] of sc) {
+    x.fillStyle = "#16202c"; x.font = "600 36px " + ui; x.fillText(n, 90, y + 12);
+    x.fillStyle = "#dfe3e9"; x.beginPath(); x.roundRect(430, y - 16, 520, 26, 13); x.fill();
+    const g = x.createLinearGradient(430, 0, 950, 0); g.addColorStop(0, "#2563eb"); g.addColorStop(1, "#06b6d4");
+    x.fillStyle = g; x.beginPath(); x.roundRect(430, y - 16, Math.max(26, 520 * v / 5), 26, 13); x.fill();
+    x.fillStyle = "#5f6b7a"; x.font = "600 32px " + ui; x.fillText(v + "/5", 970, y + 12);
+    y += 70;
+  }
+  y = 1300;
+  const strength = quoted((f.strengths || [])[0]).replace(/\s*\((?:[^()“”]*)\)/g, "");
+  if (strength) {
+    x.fillStyle = "#1f8a5b"; x.font = "700 30px " + ui; x.fillText("WORKING WELL", 90, y); y += 54;
+    x.fillStyle = "#16202c"; x.font = "400 38px " + serif; y = wrapText(x, strength, 90, y, 900, 52, 2) + 34;
+  }
+  const focus = DRILLS.find(d => d.stage === "current");
+  if (focus) {
+    x.fillStyle = "#2f54d4"; x.font = "700 30px " + ui; x.fillText("WORKING ON", 90, y); y += 54;
+    x.fillStyle = "#16202c"; x.font = "400 38px " + serif; y = wrapText(x, focus.title, 90, y, 900, 52, 2);
+  }
+  x.fillStyle = "#dfe3e9"; x.fillRect(90, H - 250, W - 180, 2);
+  x.fillStyle = "#16202c"; x.font = "800 42px " + ui; x.fillText("🔥 " + streak() + (streak() === 1 ? " day" : " days in a row"), 90, H - 180);
+  x.fillStyle = "#2f54d4"; x.font = "700 38px " + ui; x.fillText("Ten Minute Voice", 90, H - 112);
+  x.fillStyle = "#5f6b7a"; x.font = "500 32px " + ui; x.fillText("A daily voice coach that listens · " + location.host, 90, H - 66);
+  return new Promise(res => c.toBlob(res, "image/png"));
+}
+const shareLink = () => location.origin + "/?ref=" + encodeURIComponent((ME?.id || "").slice(-8));
+async function shareReport(t, btn) {
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "Making your report…";
+  try {
+    const blob = await reportImage(t), file = new File([blob], "my-voice-report.png", { type: "image/png" });
+    const text = "My voice report from Ten Minute Voice. Try a free lesson: " + shareLink();
+    if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], text });
+    else { const a = h("a", { href: URL.createObjectURL(blob), download: "my-voice-report.png" }); document.body.append(a); a.click(); a.remove();
+      try { await navigator.clipboard.writeText(text); btn.textContent = "Saved the image · link copied"; setTimeout(() => btn.textContent = label, 2500); return; } catch {} }
+  } catch (e) { if (e?.name !== "AbortError") console.warn(e); }
+  btn.textContent = label; btn.disabled = false;
 }
 
 /* ---------- coach feedback ---------- */
@@ -725,6 +808,7 @@ function feedbackPanel(t, audio, open, onDone) {
       f.strengths?.length ? [h("h4", {}, "Working well"), h("ul", {}, f.strengths.map(p => h("li", {}, rich(p, audio))))] : null,
       f.moments?.length ? [h("h4", {}, "Moment by moment"), ...f.moments.map(m => moment(m, audio))] : null,
       f.drill ? [h("h4", {}, "Tomorrow’s warm-up"), h("p", {}, rich(f.drill, audio))] : null,
+      f.scores ? h("button", { class: "btn2 wide share", type: "button", onclick: e => shareReport(t, e.currentTarget) }, "Share your voice report") : "",
       h("div", { class: "bar", style: "margin-top:6px" },
         h("button", { class: "linkbtn", type: "button", onclick: async () => { if (confirm("Ask the coach for a fresh review of this take?")) paint(await api.analyze(t.id)); } }, "Re-review"),
         t.model ? h("span", { class: "note" }, "Reviewed by " + t.model + (t.model.startsWith("gemini") ? ", listening to the audio" : ", from pitch and timing measurements")) : null));
@@ -913,6 +997,27 @@ function paintHud() {
   $("#hud").replaceChildren(h("span", { class: "chip" + (n ? " hot" : ""), title: "Day streak" }, "🔥 " + n));
 }
 
+/* ---------- first run: what this is, one question, then Lesson 1 ---------- */
+const GOAL_OPTIONS = [["work", "Sound confident at work", "Meetings, calls, interviews"], ["stage", "Present and speak in public", "Talks, pitches, toasts"],
+  ["clarity", "Be understood more easily", "Clearer English, steadier pace"], ["perform", "Read aloud and perform", "Audiobooks, acting, stories"]];
+function needsWelcome() { return !store.get("onboarded") && !LESSONS.length && !reads().length; }
+function renderWelcome(v) {
+  document.body.classList.add("lesson-mode");
+  const wave = listeningWave(170);
+  const one = () => v.replaceChildren(h("div", { class: "welcome" }, h("div", { class: "welcome-wave" }, wave),
+      h("h1", {}, "Your voice coach"),
+      h("p", { class: "how" }, "Six minutes a day. Read aloud, and your coach hears what a voice teacher hears, then tells you exactly how to fix it."),
+      h("ul", { class: "ticks" }, ["Notes on breath, pace, endings and resonance", "Tap any note to hear that moment", "A plan that changes as you improve"].map(x => h("li", {}, x)))),
+    h("div", { class: "dock" }, h("button", { class: "cta", type: "button", onclick: two }, "Get started")));
+  const two = () => v.replaceChildren(h("div", { class: "welcome" },
+      h("div", { class: "eyebrow" }, "One question"), h("h2", { class: "ltitle" }, "What do you want your voice to do?"),
+      h("p", { class: "how" }, "Your coach will focus on what matters most for it."),
+      h("div", { class: "menu" }, GOAL_OPTIONS.map(([id, name, sub]) => h("button", { type: "button", onclick: () => pick(id) }, h("b", {}, name), h("span", {}, sub), h("i", {}, "›"))))),
+    h("div", { class: "dock" }, h("button", { class: "linkbtn", type: "button", onclick: () => pick(null), style: "justify-self:center" }, "Skip")));
+  const pick = id => { if (id) store.set("goal", id); store.set("onboarded", Date.now()); exitLesson(); store.set("inLesson", "start"); go("today"); };
+  one();
+}
+
 /* ---------- navigation: Today (the lesson), Practice (free play), Journey (your path and history) ---------- */
 const ICON = {
   today: '<svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg>',
@@ -979,6 +1084,7 @@ async function renderToday(v) {
     v.innerHTML = "";
   }
   const L = LESSON;
+  if (store.get("inLesson") === "start") store.set("inLesson", L.id);   // just finished the welcome: straight into Lesson 1
   if (L.status === "done") return lessonDone(v, L);
   if (store.get("inLesson") === L.id) return runLesson(v, L);
   const steps = lessonSteps(L), started = store.get("lessonStep:" + L.id, 0) > 0;
@@ -1572,7 +1678,7 @@ function uploadWidget(onDone) {
   /* No sign-up to start: a first visit gets a guest account on this device. */
   try {
     let r = await fetch("api/me");
-    if (r.status === 401) r = await fetch("api/guest", { method: "POST" });
+    if (r.status === 401) r = await fetch("api/guest", { method: "POST", body: JSON.stringify({ src: firstTouch() }) });
     if (r.ok) ME = await r.json();
     else if (r.status === 429) { $("#view").append(h("div", { class: "empty" }, (await r.json()).error, " ", h("a", { href: "api/signin" }, "Sign in"))); return; }
   } catch {}
@@ -1583,6 +1689,7 @@ function uploadWidget(onDone) {
   buildPages();
   if (ME) { await loadTakes(); flushLocal().then(async n => { if (n) { await loadTakes(); go(current); } }); }
   paintHud();
+  if (ME && needsWelcome()) return renderWelcome($("#view"));
   go(current);
 })();
 </script>
