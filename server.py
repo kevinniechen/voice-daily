@@ -18,7 +18,7 @@ GEMINI_MODELS direct from Google. If none answer, Claude reads the measurements 
   PORT             default 8000
   DAILY_LIMIT      reviews + drill grades per person per day, default 60
 """
-import base64, json, mimetypes, os, queue, re, sqlite3, subprocess, threading, time, traceback, urllib.error, urllib.request, uuid
+import base64, hashlib, json, secrets, mimetypes, os, queue, re, sqlite3, subprocess, threading, time, traceback, urllib.error, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, quote, unquote
 
@@ -38,6 +38,9 @@ MODEL = LISTENERS[0][1] if LISTENERS else CLAUDE_MODEL
 def coach_ready(): return True
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "60"))
 IMPORT_ORIGINS = {"https://kevinniechen.github.io"}
+GUEST_COOKIE = "vd_guest"
+GUESTS_PER_IP_DAY = int(os.environ.get("GUESTS_PER_IP_DAY", "10"))
+GUEST_REVIEWS_DAY = int(os.environ.get("GUEST_REVIEWS_DAY", "300"))  # all guests together, to protect the model budget
 IMPORT_TOKENS = {}  # token -> (user_id, expires)
 STATIC = {"/": "index.html", "/index.html": "index.html", "/books.json": "books.json", "/manifest.webmanifest": "manifest.webmanifest",
           "/icon-192.png": "icon-192.png", "/icon-512.png": "icon-512.png", "/apple-touch-icon.png": "apple-touch-icon.png"}
@@ -71,7 +74,9 @@ for ddl in (  # added after launch; each is a no-op once applied. Tables first, 
         "ALTER TABLE drills ADD COLUMN passes INTEGER DEFAULT 0",     # lesson days passed while current
         "ALTER TABLE drills ADD COLUMN last_pass TEXT",
         "ALTER TABLE drills ADD COLUMN level INTEGER DEFAULT 0",      # review passes
-        "ALTER TABLE drills ADD COLUMN flags INTEGER DEFAULT 1"):     # how many reviews raised this habit
+        "ALTER TABLE drills ADD COLUMN flags INTEGER DEFAULT 1",      # how many reviews raised this habit
+        "ALTER TABLE users ADD COLUMN guest_hash TEXT",               # guests: sha256 of their device cookie
+        "ALTER TABLE users ADD COLUMN ip TEXT"):
     try: db.execute(ddl)
     except sqlite3.OperationalError: pass
 
@@ -472,7 +477,8 @@ def grade_drill(r, mp3, words):
             "Judge only the skill this drill targets.\n\n"
             "The drill: %s (%s)\nThe problem it fixes: %s\nWhy it happens: %s\nExercise: %s\nSteps:\n%s\nWhen it's working: %s" % (
             d["title"], d["area"], CITE.sub(lambda m: m[1], lesson.get("hear", "")), lesson.get("why", ""), lesson.get("exercise", ""),
-            "\n".join("- " + x for x in lesson.get("steps", [])), lesson.get("feel", "")))
+            "\n".join("- " + x for x in lesson.get("steps", [])), lesson.get("feel", "")) +
+            ("\nThe lines they were given to say:\n" + "\n".join("- " + x for x in lesson["lines"]) if lesson.get("lines") else ""))
     fb = quick_grade(r, mp3, words, task, past_attempts(r, "drill_id=?", (d["id"],)))
     if r["lesson_id"]: progress(d, r, fb["grade"])
 
@@ -522,11 +528,39 @@ READ_KINDS = ("daily", "weekly", "upload")  # full reviews; the rest get a quick
 FILE_SCHEMA = _obj({"same_as": {"type": "array", "items": {"type": "integer"},
     "description": "One entry per new lesson, in order: the number of the existing focus it works on, or -1 if it's a new habit."}})
 
+LINES_SCHEMA = _obj({"lines": {"type": "array", "items": {"type": "string"},
+    "description": "3-5 short sentences (under ~20 words each) for the student to say while doing this exercise."}})
+
+def drill_lines(did):
+    """Give a focus the words to practise it on: lines from the passage the coach heard, or original ones."""
+    d = q("SELECT * FROM drills WHERE id=?", (did,), one=True)
+    if not d: return
+    l = json.loads(d["lesson"])
+    if l.get("lines"): return
+    src = q("SELECT text FROM takes WHERE id=?", (d["from_take"],), one=True)
+    text = (src["text"] if src else "") or ""
+    try:
+        lines = call_claude("A voice teacher gave a student this exercise. Choose the words they will say while doing it: 3-5 short "
+            "sentences that exercise exactly this habit (e.g. for breath through endings: sentences that end on an important word; "
+            "for consonants: lines dense with the sounds they fumble). " +
+            ("Take them from the passage they read, quoting exactly; you may cut a long sentence at a natural break. Put any lines "
+             "the exercise steps mention first." if text.strip() else "Write original lines in plain modern English.") +
+            "\n\nExercise: %s\nThe habit: %s\nSteps:\n%s" % (l.get("exercise", ""), plain_text(l.get("hear", "")), "\n".join("- " + x for x in l.get("steps", []))) +
+            ("\n\nThe passage:\n\"\"\"%s\"\"\"" % text[:4000] if text.strip() else ""),
+            schema=LINES_SCHEMA, effort="low")["lines"]
+    except Exception:
+        traceback.print_exc(); return
+    l["lines"] = [x.strip() for x in lines if x.strip()][:5]
+    q("UPDATE drills SET lesson=? WHERE id=?", (json.dumps(l), did))
+
+def plain_text(t): return CITE.sub(lambda m: m[1], t or "")
+
 def make_drill(t, n, lesson):
     did = "%s-L%d" % (t["id"], n)
     if not q("SELECT 1 FROM drills WHERE id=?", (did,), one=True):
         q("INSERT INTO drills(id,user_id,title,area,lesson,from_take,created,due,stage) VALUES(?,?,?,?,?,?,?,?,'queued')",
           (did, t["user_id"], lesson.get("title", ""), lesson.get("area", ""), json.dumps(lesson), t["id"], int(time.time()), int(time.time())))
+        drill_lines(did)
     return did
 
 def file_drills(take_id):
@@ -598,9 +632,31 @@ def worker():
     while True:
         tid = jobs.get()
         try:
-            if isinstance(tid, tuple): file_drills(tid[1])
+            if isinstance(tid, tuple): {"file": file_drills, "lines": drill_lines}[tid[0]](tid[1])
             else: analyze(tid)
         finally: jobs.task_done()
+
+def merge_user(src, dst):
+    """A guest signed in: move their recordings, focuses, lessons and practice days into the account."""
+    if src == dst: return
+    for t in ("takes", "drills", "lessons"): q("UPDATE %s SET user_id=? WHERE user_id=?" % t, (dst, src))
+    a, b = os.path.join(DATA, "audio", src), os.path.join(DATA, "audio", dst)
+    if os.path.isdir(a):
+        os.makedirs(b, exist_ok=True)
+        for f in os.listdir(a): os.replace(os.path.join(a, f), os.path.join(b, f))
+        os.rmdir(a)
+    gs, us = [q("SELECT json FROM state WHERE user_id=?", (u,), one=True) for u in (src, dst)]
+    if gs:
+        g, u = json.loads(gs["json"]), json.loads(us["json"]) if us else {}
+        days = {k: sorted(set(u.get("days", {}).get(k, [])) | set(v)) for k, v in g.get("days", {}).items()}
+        merged = {**g, **u, "days": {**u.get("days", {}), **days}}
+        q("INSERT INTO state(user_id,json,updated) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET json=excluded.json, updated=excluded.updated",
+          (dst, json.dumps(merged), int(time.time())))
+        q("DELETE FROM state WHERE user_id=?", (src,))
+    # one lesson per day: if both had one today, keep the account's
+    for l in q("SELECT l.id FROM lessons l WHERE l.user_id=? AND EXISTS (SELECT 1 FROM lessons k WHERE k.user_id=? AND k.date=l.date AND k.created<l.created)", (dst, dst)):
+        q("UPDATE takes SET lesson_id=NULL, step=NULL WHERE lesson_id=?", (l["id"],)); q("DELETE FROM lessons WHERE id=?", (l["id"],))
+    q("DELETE FROM users WHERE id=?", (src,))
 
 # ---------- http ----------
 class H(BaseHTTPRequestHandler):
@@ -609,12 +665,42 @@ class H(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *a): pass
 
+    # Who's asking: a signed-in exe.dev user (headers set by the exe.dev proxy, which strips any a client sends),
+    # or a guest identified by a random device cookie. Guests can do everything; signing in keeps progress across
+    # devices, and whatever the guest did on this device moves into the account.
+    def guest_token(self):
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == GUEST_COOKIE and re.fullmatch(r"[A-Za-z0-9_-]{20,100}", v): return v
+        return None
+
     def user(self):
-        uid = self.headers.get("X-ExeDev-UserID")
-        if not uid: return None
-        email = self.headers.get("X-ExeDev-Email", "")
-        q("INSERT INTO users(id,email,created) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email", (uid, email, int(time.time())))
-        return {"id": uid, "email": email}
+        uid, tok = self.headers.get("X-ExeDev-UserID"), self.guest_token()
+        if uid:
+            email = self.headers.get("X-ExeDev-Email", "")
+            q("INSERT INTO users(id,email,created) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email", (uid, email, int(time.time())))
+            if tok:
+                g = q("SELECT id FROM users WHERE guest_hash=?", (hashlib.sha256(tok.encode()).hexdigest(),), one=True)
+                if g: merge_user(g["id"], uid)
+                self._cookie = GUEST_COOKIE + "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+            return {"id": uid, "email": email, "guest": False}
+        if tok:
+            g = q("SELECT id FROM users WHERE guest_hash=?", (hashlib.sha256(tok.encode()).hexdigest(),), one=True)
+            if g: return {"id": g["id"], "email": "", "guest": True}
+        return None
+
+    def client_ip(self):
+        return (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[-1].strip()  # the proxy appends the real one; earlier entries are client-supplied
+
+    def new_guest(self):
+        ip = self.client_ip()
+        n = q("SELECT COUNT(*) c FROM users WHERE ip=? AND created>?", (ip, int(time.time()) - 86400), one=True)["c"]
+        if n >= GUESTS_PER_IP_DAY: return None
+        tok = secrets.token_urlsafe(32)
+        gid = "guest-" + secrets.token_hex(8)
+        q("INSERT INTO users(id,email,created,guest_hash,ip) VALUES(?,?,?,?,?)", (gid, "", int(time.time()), hashlib.sha256(tok.encode()).hexdigest(), ip))
+        self._cookie = GUEST_COOKIE + "=" + tok + "; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax"
+        return {"id": gid, "email": "", "guest": True}
 
     def send(self, code, body=b"", ctype="application/json", headers=None):
         if isinstance(body, (dict, list)): body = json.dumps(body).encode()
@@ -624,6 +710,7 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store" if ctype == "application/json" else "no-cache")
         for k, v in (headers or {}).items(): self.send_header(k, v)
+        if getattr(self, "_cookie", None): self.send_header("Set-Cookie", self._cookie); self._cookie = None
         self.end_headers()
         if self.command != "HEAD": self.wfile.write(body)
 
@@ -662,15 +749,16 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path); p = u.path
         if p in STATIC or (p.startswith("/audio/") and re.fullmatch(r"/audio/[a-z0-9_-]+\.mp3", p)):
-            if p in ("/", "/index.html") and not self.headers.get("X-ExeDev-UserID"):
-                return self.send(302, b"", "text/plain", {"Location": "/__exe.dev/login?redirect=" + quote(self.path)})
             return self.send_file(os.path.join(APP, STATIC.get(p, p.lstrip("/"))),
                                   cache="public, max-age=86400" if p.startswith("/audio/") else "no-cache")
         if not p.startswith("/api/"): return self.send(404, {"error": "not found"})
+        if p == "/api/signin": return self.send(302, b"", "text/plain", {"Location": "/__exe.dev/login?redirect=/"})
         me = self.user()
         if not me: return self.send(401, {"error": "login required", "login": "/__exe.dev/login?redirect=/"})
         if p == "/api/me":
             return self.send(200, {**me, "coach": coach_ready(), "model": MODEL})
+        if p == "/api/signin":  # exe.dev login, then back home; the guest cookie rides along so their progress moves over
+            return self.send(302, b"", "text/plain", {"Location": "/__exe.dev/login?redirect=/"})
         if p == "/api/state":
             r = q("SELECT json FROM state WHERE user_id=?", (me["id"],), one=True)
             return self.send(200, json.loads(r["json"]) if r else {})
@@ -734,6 +822,9 @@ class H(BaseHTTPRequestHandler):
                   (me["id"], json.dumps(merged), int(time.time())))
                 return self.send(200, {"ok": True}, headers=self.cors())
             return self.send(404, {"error": "not found"}, headers=self.cors())
+        if p == "/api/guest":
+            me = self.user() or self.new_guest()
+            return self.send(200, me) if me else self.send(429, {"error": "Too many new accounts from this network today. Try again tomorrow, or sign in."})
         me = self.user()
         if not me: return self.send(401, {"error": "login required"})
         if p == "/api/import-token":
@@ -798,9 +889,13 @@ class H(BaseHTTPRequestHandler):
         return self.send(200, take_json(q("SELECT * FROM takes WHERE id=?", (tid,), one=True)), headers=extra)
 
     def queue_if_allowed(self, me, tid):
-        n = q("SELECT COUNT(*) c FROM takes WHERE user_id=? AND analyzed>?", (me["id"], int(time.time()) - 86400), one=True)["c"]
+        day = int(time.time()) - 86400
+        n = q("SELECT COUNT(*) c FROM takes WHERE user_id=? AND analyzed>?", (me["id"], day), one=True)["c"]
+        g = me.get("guest") and q("SELECT COUNT(*) c FROM takes WHERE user_id LIKE 'guest-%' AND analyzed>?", (day,), one=True)["c"]
         if n >= DAILY_LIMIT:
             q("UPDATE takes SET status='error', error=? WHERE id=?", ("Daily feedback limit reached (%d). Try again tomorrow." % DAILY_LIMIT, tid))
+        elif g and g >= GUEST_REVIEWS_DAY:
+            q("UPDATE takes SET status='error', error=? WHERE id=?", ("The coach is very busy today. Sign in to keep going, or try again tomorrow.", tid))
         else:
             jobs.put(tid)
 
@@ -827,6 +922,9 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     # resume anything interrupted by a restart (and takes recorded before a key was set)
+    # focuses made before practice lines existed
+    for r in q("SELECT id FROM drills WHERE lesson NOT LIKE '%\"lines\"%'"):
+        jobs.put(("lines", r["id"]))
     # reviews from before the library existed: file their exercises (oldest first, so later ones dedupe against them)
     for r in q("SELECT id FROM takes WHERE status='done' AND filed IS NULL AND kind IN ('daily','weekly','upload') ORDER BY ts"):
         jobs.put(("file", r["id"]))

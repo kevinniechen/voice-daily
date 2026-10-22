@@ -224,6 +224,10 @@ body.lesson-mode .wrap{padding-top:calc(4px + env(safe-area-inset-top,0px));padd
 .sheet p{margin:0;font-size:15.5px}
 .sheet audio{width:100%;height:40px}
 .sheet-actions{display:grid;grid-template-columns:auto 1fr;gap:10px;margin-top:4px}
+.listening-anim{position:relative;margin:0 -16px;overflow:hidden}
+.wave{display:block;width:100%}
+.listening-text{text-align:center;font:600 15px/1.3 var(--ui);color:var(--muted);margin-top:2px}
+.fb .listening-anim,.att .listening-anim{margin:4px 0;border-radius:12px}
 .listening{display:flex;align-items:center;gap:10px;font:600 16px/1.3 var(--ui);color:var(--muted);min-height:40px}
 .dots3{display:inline-flex;gap:4px} .dots3 i{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:blinkd 1.2s infinite}
 .dots3 i:nth-child(2){animation-delay:.2s} .dots3 i:nth-child(3){animation-delay:.4s}
@@ -246,6 +250,9 @@ body.lesson-mode .wrap{padding-top:calc(4px + env(safe-area-inset-top,0px));padd
 .lbar{display:flex;gap:4px;margin:0 0 18px}
 .lbar i{flex:1;height:6px;border-radius:3px;background:var(--line)}
 .lbar i.done{background:var(--ok)} .lbar i.now{background:var(--accent)}
+.says{padding:16px 18px;margin:0 0 12px}
+.says ol{margin:6px 0 0;padding-left:22px;display:grid;gap:10px;font:400 19px/1.5 var(--read)}
+details.why{margin:0 0 12px;font-size:15px;color:var(--muted)} details.why summary{cursor:pointer;font-weight:600;color:var(--ink)} details.why p{margin:6px 0 0}
 .exb{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:10px 14px;margin:0 0 12px;font-size:15px}
 .exb summary{cursor:pointer;font-weight:600}
 .exb ol{margin:8px 0;padding-left:20px} .exb li{margin:4px 0} .exb p{margin:6px 0 0}
@@ -514,6 +521,60 @@ function recWidget(kind, meta, onSaved, onStart) {
   return h("div", { class: "inline-rec" }, btn, cap);
 }
 
+/* ---------- the "coach is listening" animation: layered waves of light flowing across, like water ---------- */
+function listeningWave(height = 120) {
+  const c = h("canvas", { class: "wave", "aria-hidden": "true", style: "height:" + height + "px" });
+  const ctx = c.getContext("2d");
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  /* ribbons: colours across, speed, waves across the width, height (fraction of half-height), phase */
+  const ribbons = [
+    [["#2563eb", "#3b82f6", "#06b6d4"], 0.9, 1.15, 0.95, 0.0],
+    [["#7c3aed", "#4f46e5", "#0ea5e9"], -0.7, 1.55, 0.75, 1.9],
+    [["#06b6d4", "#6366f1", "#a855f7"], 1.25, 2.05, 0.6, 3.4],
+    [["#38bdf8", "#818cf8", "#22d3ee"], -1.6, 2.7, 0.42, 5.0],
+  ];
+  let t0 = performance.now(), raf = 0;
+  const draw = now => {
+    if (!c.isConnected && now - t0 > 500) return cancelAnimationFrame(raf);
+    const dpr = Math.min(devicePixelRatio || 1, 2), W = c.clientWidth || 300, H = height, mid = H / 2;
+    if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.globalCompositeOperation = dark ? "screen" : "source-over";
+    const t = (now - t0) / 1000, breathe = 0.7 + 0.3 * Math.sin(t * 1.1);
+    const curve = (u, freq, speed, ph) => Math.sin(u * freq * Math.PI * 2 + t * speed * 2.4 + ph) * 0.75 + Math.sin(u * freq * 4.1 + t * speed * 3.7 + ph * 1.7) * 0.25;
+    for (const [cols, speed, freq, amp, ph] of ribbons) {
+      const g = ctx.createLinearGradient(0, 0, W, 0);
+      cols.forEach((col, i) => g.addColorStop(i / (cols.length - 1), col));
+      const top = [], bot = [];
+      for (let x = 0; x <= W; x += 3) {
+        const u = x / W, env = Math.pow(Math.sin(Math.PI * u), 1.6);          // pinched to a point at both ends
+        const y = curve(u, freq, speed, ph) * env * amp * breathe * (H * 0.46);
+        top.push([x, mid - y]); bot.push([x, mid + y * 0.35 - env * 2]);     // a lens: full curve above, a softer echo below
+      }
+      ctx.beginPath(); top.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+      for (let i = bot.length - 1; i >= 0; i--) ctx.lineTo(bot[i][0], bot[i][1]);
+      ctx.closePath();
+      ctx.globalAlpha = dark ? 0.32 : 0.22; ctx.fillStyle = g; ctx.fill();
+      /* silk: fine threads riding the ribbon, like light on moving water */
+      for (let k = 0; k < 5; k++) {
+        const f = 1 - k * 0.17;
+        ctx.beginPath();
+        top.forEach(([x], i) => { const y = mid - (mid - top[i][1]) * f; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+        ctx.globalAlpha = (dark ? 0.75 : 0.6) * (1 - k * 0.16); ctx.lineWidth = k ? 0.9 : 2; ctx.strokeStyle = g; ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+    if (!still) raf = requestAnimationFrame(draw);
+  };
+  raf = requestAnimationFrame(draw);
+  return c;
+}
+function listening(text, height) {
+  return h("div", { class: "listening-anim", role: "status" }, listeningWave(height), h("div", { class: "listening-text" }, text));
+}
+
 /* ---------- coach feedback ---------- */
 const SKILLS = [["pitch_variation", "Pitch"], ["stress", "Stress"], ["pace_and_pauses", "Pace"], ["articulation", "Articulation"], ["endings", "Endings"], ["fluency", "Fluency"]];
 const mmss = s => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
@@ -536,7 +597,7 @@ function feedbackPanel(t, audio, open, onDone) {
     el.innerHTML = "";
     if (t.status === "queued" || t.status === "processing") {
       waited = true;
-      el.append(h("div", { class: "fbstate" }, QUICK[t.kind] ? "Coach is listening…" : t.status === "queued" ? "Waiting for the coach…" : "Coach is listening and writing notes (1 to 2 minutes)…"));
+      el.append(listening(QUICK[t.kind] ? "Your coach is listening…" : "Your coach is listening and writing notes · 1–2 minutes", 84));
       return watch(t.id, paint);
     }
     if (waited && onDone) { waited = false; return onDone(t); }
@@ -915,7 +976,7 @@ function stepRec(L, step, kind, meta, repaint, onStart) {
       const content = h("div", { class: "sheet-body" });
       const paint = t => {
         if (QUICK[t.kind]) {
-          if (t.status === "queued" || t.status === "processing") return content.replaceChildren(h("div", { class: "listening" }, h("span", { class: "dots3" }, h("i"), h("i"), h("i")), "Your coach is listening…"));
+          if (t.status === "queued" || t.status === "processing") { if (!content.querySelector(".listening-anim")) content.replaceChildren(listening("Your coach is listening…", 130)); return; }
           if (t.status === "error") return content.replaceChildren(h("p", { class: "fbstate err" }, "Couldn’t grade this one: " + (t.error || "unknown error")));
           const f = t.feedback || {}, g = GRADES[f.grade] || GRADES.almost;
           el.dataset.grade = f.grade || "";
@@ -940,6 +1001,12 @@ function stepRec(L, step, kind, meta, repaint, onStart) {
           h("button", { class: "cta", type: "button", onclick: cont }, last ? "Finish lesson" : "Continue"))));
     },
   };
+}
+/* The words to say for a focus, big and readable. */
+function linesCard(d) {
+  const lines = d.lesson.lines || [];
+  if (!lines.length) return "";
+  return h("div", { class: "card says" }, h("div", { class: "eyebrow" }, "Say these"), h("ol", {}, lines.map(x => h("li", {}, x))));
 }
 function exerciseBlock(d, open) {
   const l = d.lesson;
@@ -979,15 +1046,15 @@ function stepWarm(v, L, repaint) {
 function stepReview(v, L, repaint) {
   const d = L.review;
   v.append(h("div", { class: "eyebrow" }, "Quick review"), h("h2", { class: "ltitle" }, d.title),
-    h("p", { class: "how" }, "You passed this before. Record yourself doing it once to check it stuck."), exerciseBlock(d, false));
+    h("p", { class: "how" }, "You passed this before. Record yourself doing it once to check it stuck."), linesCard(d), exerciseBlock(d, false));
   return withSkip(stepRec(L, "review", "drill", () => ({ label: d.title, drill_id: d.id }), repaint), repaint);
 }
 function stepDrill(v, L, repaint) {
   const d = L.focus, l = d.lesson;
   v.append(h("div", { class: "eyebrow" }, "Today’s focus"), h("h2", { class: "ltitle" }, d.title),
     h("div", { class: "pass" }, [...Array(3)].map((_, j) => h("i", { class: j < d.passes ? "on" : "" })), h("span", {}, d.passes + " of 3 days passed")),
-    l.why ? h("p", { class: "how" }, plain(l.why)) : "",
-    exerciseBlock(d, true));
+    l.why ? h("details", { class: "why" }, h("summary", {}, "Why this matters"), h("p", {}, plain(l.why))) : "",
+    linesCard(d), exerciseBlock(d, !(l.lines || []).length));
   return withSkip(stepRec(L, "drill", "drill", () => ({ label: d.title, drill_id: d.id }), repaint), repaint);
 }
 function stepRead(v, L, repaint) {
@@ -1107,7 +1174,7 @@ function exerciseCard(d) {
     box.replaceChildren(...[
       h("summary", {}, h("div", { class: "dh" }, h("div", {}, h("div", { class: "k" }, d.area + " · " + STAGE[d.stage]), h("b", {}, d.title)),
         h("div", { class: "dots" }, att.slice(0, 8).reverse().map(a => h("i", { class: a.feedback?.grade || "pending" }))))),
-      exerciseBlock(d, true),
+      linesCard(d), exerciseBlock(d, !(d.lesson.lines || []).length),
       recWidget("drill", () => ({ label: d.title, drill_id: d.id }), async () => { await loadTakes(); d = DRILLS.find(x => x.id === d.id) || d; paint(); }),
       att[0] ? attemptRow(att[0], async () => { await loadTakes(); d = DRILLS.find(x => x.id === d.id) || d; paint(); }) : null,
       att.length > 1 ? h("details", { class: "older" }, h("summary", {}, (att.length - 1) + " earlier tr" + (att.length > 2 ? "ies" : "y")), att.slice(1).map(a => attemptRow(a))) : null].filter(Boolean));
@@ -1213,6 +1280,9 @@ function renderJourney(v) {
   const days = [], log = dayLog();
   for (let i = 13; i >= 0; i--) { const dt = new Date(); dt.setDate(dt.getDate() - i); days.push(h("i", { class: log[dayStr(dt)]?.length ? "on" : "", title: dayStr(dt) })); }
   v.append(h("div", { class: "head" }, h("h2", {}, "Journey")), installCard(),
+    ME?.guest ? h("div", { class: "card install", style: "margin:0 0 14px;padding:14px 16px" },
+      h("p", {}, "Your progress is saved on this device. Sign in to keep it on all your devices."),
+      h("a", { class: "btn2", href: "api/signin", style: "min-height:44px;padding:0 16px;flex:none" }, "Sign in")) : "",
     h("div", { class: "stats" },
       h("div", { class: "stat" }, h("b", {}, "🔥 " + streak()), h("span", {}, "day streak")),
       h("div", { class: "stat" }, h("b", {}, LESSONS.filter(l => l.status === "done").length), h("span", {}, "lessons")),
@@ -1366,9 +1436,15 @@ function uploadWidget(onDone) {
 (async () => {
   if (location.hostname.endsWith("github.io")) return movedNotice();
   if (await importHandoff()) return;
-  try { const r = await fetch("api/me"); if (r.status === 401) { location.href = "/__exe.dev/login?redirect=/"; return; } ME = await r.json(); } catch {}
+  /* No sign-up to start: a first visit gets a guest account on this device. */
+  try {
+    let r = await fetch("api/me");
+    if (r.status === 401) r = await fetch("api/guest", { method: "POST" });
+    if (r.ok) ME = await r.json();
+    else if (r.status === 429) { $("#view").append(h("div", { class: "empty" }, (await r.json()).error, " ", h("a", { href: "api/signin" }, "Sign in"))); return; }
+  } catch {}
   try { navigator.storage?.persist && navigator.storage.persist(); } catch {}
-  if (ME) { $("#foot").prepend(h("div", {}, "Signed in as " + ME.email + ".")); await sync.pull(); }
+  if (ME) { $("#foot").prepend(h("div", {}, ME.guest ? "Using a guest account on this device." : "Signed in as " + ME.email + ".")); await sync.pull(); }
   current = IMPORTED ? "journey" : store.get("tab", "today");
   try { BOOKS = await (await fetch("books.json")).json(); } catch { BOOKS = []; }
   buildPages();
