@@ -314,6 +314,13 @@ async function loadTakes() {
   return TAKES;
 }
 const reads = () => TAKES.filter(t => t.kind !== "drill");
+const dayKey = ts => new Date(ts).toDateString();
+/* "Session 2" when you read more than once that day; "" otherwise. */
+function sessionOf(t) {
+  if (t.kind !== "daily") return "";
+  const same = TAKES.filter(x => x.kind === "daily" && dayKey(x.ts) === dayKey(t.ts));
+  return same.length > 1 ? "Session " + (same.filter(x => x.ts <= t.ts).length) : "";
+}
 function focusNote(text) {
   if (!text) return "";
   const d = new Date(PLAN.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -512,7 +519,7 @@ function takeRow(t, onDelete, tag, open) {
   const audio = h("audio", { controls: true, preload: "metadata", src: "api/takes/" + encodeURIComponent(t.id) + "/audio" });
   return h("div", { class: "take" },
     h("span", { class: "d" }, d.toLocaleDateString(undefined, { month: "short", day: "numeric" })),
-    h("span", { class: "tag" }, [tag, t.label !== tag ? t.label : null, fmt(t.secs)].filter(Boolean).join(" · ")), x,
+    h("span", { class: "tag" }, [sessionOf(t), tag, t.label !== tag ? t.label : null, fmt(t.secs)].filter(Boolean).join(" · ")), x,
     audio, feedbackPanel(t, audio, open));
 }
 
@@ -865,7 +872,7 @@ function renderProgress(v) {
   }
   if (done.length) {
     const grid = h("div", { class: "sparks" });
-    for (const [k, n] of SKILLS) grid.append(spark(n, done.map(t => ({ ts: t.ts, y: t.feedback.scores?.[k] })), 1, 5));
+    for (const [k, n] of SKILLS) grid.append(spark(n, done.map(t => ({ ts: t.ts, y: t.feedback.scores?.[k], s: sessionOf(t) })), 1, 5));
     const w = done.filter(t => t.feedback.wpm);
     if (w.length) grid.append(spark("Words / min", w.map(t => ({ ts: t.ts, y: t.feedback.wpm })), null, null));
     v.append(grid);
@@ -891,7 +898,7 @@ function spark(name, pts, lo, hi) {
   add("line", { class: "gr", x1: 0, x2: W, y1: H - pad, y2: H - pad, "vector-effect": "non-scaling-stroke" });
   if (pts.length > 1) add("polyline", { class: "ln", points: pts.map((p, i) => X(i) + "," + Y(p.y)).join(" "), "vector-effect": "non-scaling-stroke" });
   pts.forEach((p, i) => add("circle", { class: "dt", cx: X(i), cy: Y(p.y), r: 4, "vector-effect": "non-scaling-stroke" },
-    new Date(p.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ": " + p.y));
+    new Date(p.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + (p.s ? " (" + p.s + ")" : "") + ": " + p.y));
   return h("div", { class: "spark" }, h("div", { class: "t" }, h("span", {}, name), h("b", {}, last)), svg);
 }
 

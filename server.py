@@ -223,6 +223,12 @@ Base every judgement on this evidence and cite the numbers when useful (e.g. "ne
 You cannot judge voice quality, resonance or breathiness directly; do not claim to have heard them. \
 Score articulation and endings from the tail, confidence and misread evidence."""
 
+def when(ts, now_ts):
+    """How an earlier session reads in the prompt: a redo the same day says so, so the coach compares within the day."""
+    hrs = (now_ts - ts) / 3.6e6
+    return ("%.0f minutes earlier today" % (hrs * 60) if hrs < 1 else
+            "%.0f hours earlier today" % hrs if hrs < 12 else time.strftime("%b %d", time.localtime(ts / 1000)))
+
 def build_prompt(r, words, history, pros=None, listening=False):
     parts = [COACH, "\n\n", LISTEN if listening else MEASURED, "\n\nRecording: %s, %s, %.0f seconds." % (r["kind"], r["label"] or "", r["secs"] or 0)]
     if r["text"]:
@@ -245,8 +251,9 @@ def build_prompt(r, words, history, pros=None, listening=False):
         if cur: lines.append("[%s] %s" % (mmss(t0), " ".join(cur)))
         parts.append("\n\nTranscript with start times (MM:SS.s):\n" + "\n".join(lines))
     if history:
-        parts.append("\n\nTheir earlier sessions (oldest first), for the progress note:\n" + "\n".join(
-            "- %s: %s Scores %s. Priorities then: %s" % (time.strftime("%b %d", time.localtime(h["ts"] / 1000)), h["summary"], json.dumps(h["scores"]), "; ".join(h["priorities"]))
+        parts.append("\n\nTheir earlier sessions (oldest first), for the progress note. One from earlier today means this is a redo: "
+                     "say what changed since that attempt first, then the longer trend.\n" + "\n".join(
+            "- %s: %s Scores %s. Priorities then: %s" % (when(h["ts"], r["ts"]), h["summary"], json.dumps(h["scores"]), "; ".join(h["priorities"]))
             for h in history))
         plan = history[-1].get("_plan")
         if plan:
