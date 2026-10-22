@@ -5,12 +5,13 @@ Identity comes from the exe.dev proxy (X-ExeDev-UserID / X-ExeDev-Email).
 
 Coach pipeline: faster-whisper word timestamps -> Praat (parselmouth) pitch and
 loudness per word -> an LLM reads the passage, transcript and measurements.
-With GEMINI_API_KEY set, Gemini listens to the audio and gets the measurements as
-supporting evidence, trying GEMINI_MODELS in order (quota or overload -> next one).
-If none answer, or there's no key, Claude reads the measurements instead (it can't
-take audio). COACH=claude skips Gemini.
+Gemini listens to the audio and gets the measurements as supporting evidence. Models are
+tried in order (no key, quota or overload -> next): OPENROUTER_MODELS via OpenRouter, then
+GEMINI_MODELS direct from Google. If none answer, Claude reads the measurements instead
+(it can't take audio). COACH=claude skips Gemini.
 
-  GEMINI_MODELS    default gemini-4-argon,gemini-3.8-flash,gemini-3.6-flash
+  OPENROUTER_API_KEY, OPENROUTER_MODELS  default google/gemini-4-argon
+  GEMINI_API_KEY, GEMINI_MODELS          default gemini-4-argon,gemini-3.8-flash,gemini-3.6-flash
   CLAUDE_MODEL     default claude-opus-5-5
   ANTHROPIC_BASE_URL  default https://llm.int.exe.xyz (exe.dev gateway, no key needed)
   DATA_DIR         default ~/voice-data
@@ -29,8 +30,11 @@ for line in open(os.path.join(APP, ".env")) if os.path.exists(os.path.join(APP, 
 DATA = os.path.expanduser(os.environ.get("DATA_DIR", "~/voice-data"))
 GEMINI_MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", "gemini-4-argon,gemini-3.8-flash,gemini-3.6-flash").split(",") if m.strip()]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
-USE_GEMINI = bool(os.environ.get("GEMINI_API_KEY")) and os.environ.get("COACH", "") != "claude"
-MODEL = GEMINI_MODELS[0] if USE_GEMINI else CLAUDE_MODEL
+OPENROUTER_MODELS = [m.strip() for m in os.environ.get("OPENROUTER_MODELS", "google/gemini-4-argon").split(",") if m.strip()]
+LISTENERS = [] if os.environ.get("COACH") == "claude" else (
+    [("openrouter", m) for m in OPENROUTER_MODELS if os.environ.get("OPENROUTER_API_KEY")] +
+    [("gemini", m) for m in GEMINI_MODELS if os.environ.get("GEMINI_API_KEY")])
+MODEL = LISTENERS[0][1] if LISTENERS else CLAUDE_MODEL
 def coach_ready(): return True
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "30"))
 STATIC = {"/": "index.html", "/index.html": "index.html", "/books.json": "books.json"}
@@ -217,6 +221,28 @@ def call_claude(prompt):
 
 class Unavailable(Exception): pass
 
+def call_openrouter(model, prompt, audio_b64):
+    body = {
+        "model": model, "max_tokens": 32000, "reasoning": {"effort": "high"},
+        "messages": [{"role": "user", "content": [
+            {"type": "input_audio", "input_audio": {"data": audio_b64, "format": "mp3"}},
+            {"type": "text", "text": prompt}]}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "feedback", "strict": True, "schema": FEEDBACK_SCHEMA}},
+    }
+    req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode(), headers={
+        "Content-Type": "application/json", "Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"],
+        "HTTP-Referer": "https://voice-daily.exe.xyz/", "X-Title": "Ten Minute Voice"})
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp: out = json.load(resp)
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode(errors="replace")[:300]
+        if e.code in (402, 404, 408, 429) or e.code >= 500: raise Unavailable("%s %s" % (e.code, msg))  # no credit / busy: next model
+        raise RuntimeError("OpenRouter %s: %s" % (e.code, msg))
+    if out.get("error"): raise Unavailable(str(out["error"])[:300])
+    text = (out.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    if not text.strip(): raise Unavailable("OpenRouter returned no text")
+    return json.loads(text[text.find("{"):text.rfind("}") + 1])
+
 def call_gemini(model, prompt, audio_b64):
     key = os.environ.get("GEMINI_API_KEY")
     body = {
@@ -272,12 +298,12 @@ def analyze(take_id):
             try: pros = prosody(mp3, words)
             except Exception: traceback.print_exc()
         fb = used = None
-        if USE_GEMINI:
+        if LISTENERS:
             with open(mp3, "rb") as f: b64 = base64.b64encode(f.read()).decode()
             prompt = build_prompt(r, words, hist, pros, listening=True)
-            for m in GEMINI_MODELS:
-                try: fb, used = call_gemini(m, prompt, b64), m; break
-                except Unavailable as e: print("gemini %s unavailable: %s" % (m, e), flush=True)
+            for via, m in LISTENERS:
+                try: fb, used = (call_openrouter if via == "openrouter" else call_gemini)(m, prompt, b64), m.split("/")[-1]; break
+                except Unavailable as e: print("%s %s unavailable: %s" % (via, m, e), flush=True)
         if fb is None:
             if not words: raise RuntimeError("Couldn't transcribe this take (is anything audible?).")
             fb, used = call_claude(build_prompt(r, words, hist, pros)), CLAUDE_MODEL
@@ -449,5 +475,5 @@ if __name__ == "__main__":
         jobs.put(r["id"])
     threading.Thread(target=worker, daemon=True).start()
     port = int(os.environ.get("PORT", "8000"))
-    print("voice server on :%d, coach: %s" % (port, " -> ".join((GEMINI_MODELS if USE_GEMINI else []) + [CLAUDE_MODEL])), flush=True)
+    print("voice server on :%d, coach: %s" % (port, " -> ".join(["%s (%s)" % (m, via) for via, m in LISTENERS] + [CLAUDE_MODEL])), flush=True)
     ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()

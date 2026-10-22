@@ -14,7 +14,7 @@ Each take is reviewed automatically:
 3. Praat (parselmouth) measures each word's pitch in semitones, pitch movement, loudness, how quiet the ending is, and the pause before it.
 4. The coach model gets the passage, the marked words, those measurements and the person's last few reviews. It returns scores, priorities, a drill and timestamped notes.
 
-Coach models are tried in order: Gemini 4 Argon, Gemini 3.8 Flash and Gemini 3.6 Flash, then Claude Opus 5.5. The Gemini models listen to the audio and treat the measurements as supporting evidence. Claude can't take audio, so it works from the measurements alone, through the exe.dev LLM gateway with no key needed. The Gemini key goes in `.env` on the VM as `GEMINI_API_KEY`; it is not committed.
+Coach models are tried in order: Gemini 4 Argon through OpenRouter (`OPENROUTER_API_KEY`), Gemini 4 Argon direct from Google, Gemini 3.8 Flash and Gemini 3.6 Flash, then Claude Opus 5.5. The Gemini models listen to the audio and treat the measurements as supporting evidence. Claude can't take audio, so it works from the measurements alone, through the exe.dev LLM gateway with no key needed. The Gemini key goes in `.env` on the VM as `GEMINI_API_KEY`; it is not committed.
 
 Deploy: `rsync -a --exclude .git ./ voice-daily.exe.xyz:voice-daily/ && ssh voice-daily.exe.xyz sudo systemctl restart voice`
 Python deps on the VM (`~/venv`): `faster-whisper anthropic praat-parselmouth`.
