@@ -16,7 +16,7 @@ GEMINI_MODELS direct from Google. If none answer, Claude reads the measurements 
   ANTHROPIC_BASE_URL  default https://llm.int.exe.xyz (exe.dev gateway, no key needed)
   DATA_DIR         default ~/voice-data
   PORT             default 8000
-  DAILY_LIMIT      feedback runs per person per day, default 30
+  DAILY_LIMIT      reviews + drill grades per person per day, default 60
 """
 import base64, json, mimetypes, os, queue, re, sqlite3, subprocess, threading, time, traceback, urllib.error, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,7 +36,7 @@ LISTENERS = [] if os.environ.get("COACH") == "claude" else (
     [("gemini", m) for m in GEMINI_MODELS if os.environ.get("GEMINI_API_KEY")])
 MODEL = LISTENERS[0][1] if LISTENERS else CLAUDE_MODEL
 def coach_ready(): return True
-DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "30"))
+DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "60"))
 IMPORT_ORIGINS = {"https://kevinniechen.github.io"}
 IMPORT_TOKENS = {}  # token -> (user_id, expires)
 STATIC = {"/": "index.html", "/index.html": "index.html", "/books.json": "books.json"}
@@ -55,8 +55,12 @@ CREATE TABLE IF NOT EXISTS takes(
   text TEXT, marks TEXT, mime TEXT, status TEXT, feedback TEXT, words TEXT, error TEXT, model TEXT, analyzed INTEGER);
 CREATE INDEX IF NOT EXISTS takes_user ON takes(user_id, ts);
 """)
-try: db.execute("ALTER TABLE takes ADD COLUMN plan TEXT")  # next-session plan, added after launch
-except sqlite3.OperationalError: pass
+for ddl in ("ALTER TABLE takes ADD COLUMN plan TEXT",       # next-session plan
+            "ALTER TABLE takes ADD COLUMN drill_id TEXT",   # set on drill attempts
+            """CREATE TABLE drills(id TEXT PRIMARY KEY, user_id TEXT, title TEXT, area TEXT, lesson TEXT, from_take TEXT,
+                 created INTEGER, due INTEGER, interval INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, status TEXT DEFAULT 'active')"""):
+    try: db.execute(ddl)  # added after launch; no-op once applied
+    except sqlite3.OperationalError: pass
 
 def q(sql, args=(), one=False):
     with _db_lock:
@@ -69,6 +73,7 @@ def take_json(r):
     d["feedback"] = json.loads(r["feedback"]) if r["feedback"] else None
     d["text"] = r["text"]; d["marks"] = json.loads(r["marks"] or "[]")
     d["plan"] = json.loads(r["plan"]) if r["plan"] else None
+    d["drill_id"] = r["drill_id"]
     return d
 
 def audio_path(r, ext="mp3"): return os.path.join(DATA, "audio", r["user_id"], r["id"] + "." + ext)
@@ -270,13 +275,13 @@ def call_claude(prompt, schema=None, effort="high"):
 
 class Unavailable(Exception): pass
 
-def call_openrouter(model, prompt, audio_b64):
+def call_openrouter(model, prompt, audio_b64, schema=None):
     body = {
         "model": model, "max_tokens": 32000, "reasoning": {"effort": "high"},
         "messages": [{"role": "user", "content": [
             {"type": "input_audio", "input_audio": {"data": audio_b64, "format": "mp3"}},
             {"type": "text", "text": prompt}]}],
-        "response_format": {"type": "json_schema", "json_schema": {"name": "feedback", "strict": True, "schema": FEEDBACK_SCHEMA}},
+        "response_format": {"type": "json_schema", "json_schema": {"name": "feedback", "strict": True, "schema": schema or FEEDBACK_SCHEMA}},
     }
     req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode(), headers={
         "Content-Type": "application/json", "Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"],
@@ -292,11 +297,11 @@ def call_openrouter(model, prompt, audio_b64):
     if not text.strip(): raise Unavailable("OpenRouter returned no text")
     return json.loads(text[text.find("{"):text.rfind("}") + 1])
 
-def call_gemini(model, prompt, audio_b64):
+def call_gemini(model, prompt, audio_b64, schema=None):
     key = os.environ.get("GEMINI_API_KEY")
     body = {
         "contents": [{"role": "user", "parts": [{"inline_data": {"mime_type": "audio/mp3", "data": audio_b64}}, {"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": FEEDBACK_SCHEMA,
+        "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema or FEEDBACK_SCHEMA,
                              "thinkingConfig": {"thinkingLevel": os.environ.get("GEMINI_THINKING", "high")}},
     }
     req = urllib.request.Request(
@@ -352,8 +357,9 @@ def analyze(take_id):
             try: words = transcribe(mp3)
             except Exception: traceback.print_exc(); words = None
             if words is not None: q("UPDATE takes SET words=? WHERE id=?", (json.dumps(words), take_id))
+        if r["kind"] == "drill": return grade_drill(r, mp3, words)
         hist = [json.loads(h["feedback"]) | {"ts": h["ts"], "_plan": json.loads(h["plan"]) if h["plan"] else None} for h in q(
-            "SELECT feedback, plan, ts FROM takes WHERE user_id=? AND status='done' AND ts<? ORDER BY ts DESC LIMIT 4", (r["user_id"], r["ts"]))][::-1]
+            "SELECT feedback, plan, ts FROM takes WHERE user_id=? AND status='done' AND kind!='drill' AND ts<? ORDER BY ts DESC LIMIT 4", (r["user_id"], r["ts"]))][::-1]
         pros = None
         if words:
             try: pros = prosody(mp3, words)
@@ -374,7 +380,73 @@ def analyze(take_id):
         traceback.print_exc()
         q("UPDATE takes SET status='error', error=? WHERE id=?", (str(e)[:500], take_id))
         return
-    plan_next(take_id)
+    if r["kind"] != "drill": plan_next(take_id)
+
+# ---------- drills: an exercise from a lesson, practised on its own and repeated on a schedule ----------
+GRADE_SCHEMA = _obj({
+    "grade": {"type": "string", "enum": ["got_it", "almost", "not_yet"]},
+    "note": {"type": "string", "description": "1-2 sentences on what you heard, with linked examples [words](start-end)."},
+    "tip": {"type": "string", "description": "The one physical adjustment for the next try (empty if got_it)."},
+})
+DAY = 86400
+STEPS_DAYS = [1, 2, 4, 8]   # gap after each on-schedule pass in a row
+GRADUATE_AFTER = 5          # passes in a row (the last ones at 8 days) to graduate
+
+def drill_json(d, attempts):
+    return {k: d[k] for k in ("id", "title", "area", "created", "due", "interval", "streak", "status", "from_take")} | {
+        "lesson": json.loads(d["lesson"]), "attempts": attempts}
+
+def grade_drill(r, mp3, words):
+    d = q("SELECT * FROM drills WHERE id=?", (r["drill_id"],), one=True)
+    if not d: raise RuntimeError("This drill no longer exists.")
+    lesson = json.loads(d["lesson"])
+    past = [json.loads(a["feedback"]) | {"ts": a["ts"]} for a in q(
+        "SELECT feedback, ts FROM takes WHERE drill_id=? AND status='done' AND ts<? ORDER BY ts DESC LIMIT 3", (d["id"], r["ts"]))][::-1]
+    pros = None
+    if words:
+        try: pros = prosody(mp3, words)
+        except Exception: traceback.print_exc()
+    prompt = "\n\n".join(filter(None, [
+        "You are the student's voice teacher. They just recorded themselves doing a drill you gave them, on its own, "
+        "right after reading your instructions. Listen and grade this one attempt the way a teacher would in the room: "
+        "got_it = the target skill is clearly there; almost = moving in the right direction but not consistent; "
+        "not_yet = the old habit is still in charge. Judge only the skill this drill targets. "
+        "Be brief and specific, and link what you mention as [words as spoken](start-end) with times in seconds.",
+        "The drill: %s (%s)\nThe problem it fixes: %s\nWhy it happens: %s\nExercise: %s\nSteps:\n%s\nWhen it's working: %s" % (
+            d["title"], d["area"], CITE.sub(lambda m: m[1], lesson.get("hear", "")), lesson.get("why", ""), lesson.get("exercise", ""),
+            "\n".join("- " + x for x in lesson.get("steps", [])), lesson.get("feel", "")),
+        "Their earlier attempts (oldest first):\n" + "\n".join("- %s: %s. %s" % (
+            time.strftime("%b %d", time.localtime(a["ts"] / 1000)), a["grade"], CITE.sub(lambda m: m[1], a["note"])) for a in past) if past else "",
+        "Transcript with per-word measurements (start-end s | word | st | move | db | tail | gap | p), as supporting evidence; trust your ears:\n" +
+            "\n".join("%.2f-%.2f | %s | %s | %s | %s | %s | %s | %s" % (w["s"], w["e"], w["w"], w["st"], w["move"], w["db"], w["tail"], w["gap"], w.get("p"))
+                      for w in pros["words"]) if pros else "",
+    ]))
+    fb = used = None
+    with open(mp3, "rb") as f: b64 = base64.b64encode(f.read()).decode()
+    for via, m in LISTENERS:
+        try: fb, used = (call_openrouter if via == "openrouter" else call_gemini)(m, prompt, b64, GRADE_SCHEMA), m.split("/")[-1]; break
+        except Unavailable as e: print("%s %s unavailable: %s" % (via, m, e), flush=True)
+    if fb is None:
+        if not pros: raise RuntimeError("Couldn't hear this attempt (is anything audible?).")
+        fb, used = call_claude(prompt.replace("Listen and grade", "You can't hear it; from the measurements, grade"), schema=GRADE_SCHEMA, effort="medium"), CLAUDE_MODEL
+    dur = r["secs"] or 1e9
+    for k in ("note", "tip"):
+        fb[k] = CITE.sub(lambda m: "[%s](%.1f-%.1f)" % (m[1], max(0, min(float(m[2]), dur)), max(0, min(float(m[3] or float(m[2]) + 1.5), dur))), fb.get(k, ""))
+    q("UPDATE takes SET status='done', feedback=?, model=?, analyzed=? WHERE id=?", (json.dumps(fb), used, int(time.time()), r["id"]))
+    schedule(d, fb["grade"], r["ts"] / 1000)
+
+def schedule(d, grade, when):
+    """Only attempts made when the drill was due move the schedule; extra practice is just logged."""
+    if d["status"] != "active" or (d["due"] or 0) > when: return
+    streak, interval = d["streak"], d["interval"]
+    if grade == "got_it":
+        streak += 1; interval = STEPS_DAYS[min(streak, len(STEPS_DAYS)) - 1]
+    elif grade == "not_yet":
+        streak, interval = 0, 1
+    else:
+        interval = 1
+    status = "graduated" if streak >= GRADUATE_AFTER else "active"
+    q("UPDATE drills SET streak=?, interval=?, due=?, status=? WHERE id=?", (streak, interval, int(when + interval * DAY - 4 * 3600), status, d["id"]))
 
 # ---------- next-session plan ----------
 PLAN_SCHEMA = _obj({
@@ -498,6 +570,10 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, json.loads(r["json"]) if r else {})
         if p == "/api/takes":
             return self.send(200, [take_json(r) for r in q("SELECT * FROM takes WHERE user_id=? ORDER BY ts DESC", (me["id"],))])
+        if p == "/api/drills":
+            att = {}
+            for a in q("SELECT * FROM takes WHERE user_id=? AND kind='drill' ORDER BY ts", (me["id"],)): att.setdefault(a["drill_id"], []).append(take_json(a))
+            return self.send(200, [drill_json(d, att.get(d["id"], [])) for d in q("SELECT * FROM drills WHERE user_id=? ORDER BY due", (me["id"],))])
         m = re.fullmatch(r"/api/takes/([\w:.-]+)(/audio)?", p)
         if m:
             r = q("SELECT * FROM takes WHERE id=? AND user_id=?", (m[1], me["id"]), one=True)
@@ -557,6 +633,20 @@ class H(BaseHTTPRequestHandler):
             IMPORT_TOKENS[tok] = (me["id"], time.time() + 1800)
             return self.send(200, {"token": tok})
         if p == "/api/takes": return self.save_take(me)
+        if p == "/api/drills":
+            # make a drill from lesson N of a reviewed take (or return the one already made)
+            try: a = json.loads(self.body(1 << 16)); n = int(a["lesson"])
+            except Exception: return self.send(400, {"error": "bad request"})
+            t = q("SELECT * FROM takes WHERE id=? AND user_id=?", (a.get("take_id"), me["id"]), one=True)
+            lessons = (json.loads(t["feedback"]) if t and t["feedback"] else {}).get("lessons") or []
+            if not 0 <= n < len(lessons): return self.send(404, {"error": "lesson not found"})
+            did = "%s-L%d" % (t["id"], n)
+            if not q("SELECT 1 FROM drills WHERE id=?", (did,), one=True):
+                l = lessons[n]
+                q("INSERT INTO drills(id,user_id,title,area,lesson,from_take,created,due) VALUES(?,?,?,?,?,?,?,?)",
+                  (did, me["id"], l.get("title", ""), l.get("area", ""), json.dumps(l), t["id"], int(time.time()), int(time.time())))
+            d = q("SELECT * FROM drills WHERE id=?", (did,), one=True)
+            return self.send(200, drill_json(d, [take_json(x) for x in q("SELECT * FROM takes WHERE drill_id=? ORDER BY ts", (did,))]))
         m = re.fullmatch(r"/api/takes/([\w:.-]+)/analyze", p)
         if m:
             r = q("SELECT * FROM takes WHERE id=? AND user_id=?", (m[1], me["id"]), one=True)
@@ -593,9 +683,10 @@ class H(BaseHTTPRequestHandler):
         try: secs = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio_path(row)], capture_output=True, text=True).stdout.strip())
         except ValueError: secs = float(meta.get("secs") or 0)
         ts = int(meta.get("ts") or time.time() * 1000)
-        q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
-          (tid, me["id"], meta.get("kind", "daily"), meta.get("label", ""), ts, round(secs, 2), meta.get("text", ""),
-           json.dumps(meta.get("marks", [])), mime, "queued"))
+        drill = q("SELECT id FROM drills WHERE id=? AND user_id=?", (meta.get("drill_id"), me["id"]), one=True) if meta.get("drill_id") else None
+        q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status,drill_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+          (tid, me["id"], "drill" if drill else meta.get("kind", "daily"), meta.get("label", ""), ts, round(secs, 2), meta.get("text", ""),
+           json.dumps(meta.get("marks", [])), mime, "queued", drill["id"] if drill else None))
         self.queue_if_allowed(me, tid)
         return self.send(200, take_json(q("SELECT * FROM takes WHERE id=?", (tid,), one=True)), headers=extra)
 
@@ -609,20 +700,28 @@ class H(BaseHTTPRequestHandler):
     def do_DELETE(self):
         me = self.user()
         if not me: return self.send(401, {"error": "login required"})
+        m = re.fullmatch(r"/api/drills/([\w:.-]+)", urlparse(self.path).path)
+        if m:  # removes the drill and its practice recordings
+            for t in q("SELECT * FROM takes WHERE drill_id=? AND user_id=?", (m[1], me["id"])): self.remove_take(t)
+            q("DELETE FROM drills WHERE id=? AND user_id=?", (m[1], me["id"]))
+            return self.send(200, {"ok": True})
         m = re.fullmatch(r"/api/takes/([\w:.-]+)", urlparse(self.path).path)
         if not m: return self.send(404, {"error": "not found"})
         r = q("SELECT * FROM takes WHERE id=? AND user_id=?", (m[1], me["id"]), one=True)
         if not r: return self.send(404, {"error": "not found"})
+        self.remove_take(r)
+        self.send(200, {"ok": True})
+
+    def remove_take(self, r):
         d = os.path.dirname(audio_path(r))
-        for f in os.listdir(d):
+        for f in os.listdir(d) if os.path.isdir(d) else []:
             if f.startswith(r["id"] + "."): os.remove(os.path.join(d, f))
         q("DELETE FROM takes WHERE id=?", (r["id"],))
-        self.send(200, {"ok": True})
 
 if __name__ == "__main__":
     # resume anything interrupted by a restart (and takes recorded before a key was set)
     # each person's latest review should have a plan for their next session
-    for r in q("SELECT t.id FROM takes t WHERE status='done' AND plan IS NULL AND ts=(SELECT MAX(ts) FROM takes WHERE user_id=t.user_id AND status='done')"):
+    for r in q("SELECT t.id FROM takes t WHERE status='done' AND plan IS NULL AND kind!='drill' AND ts=(SELECT MAX(ts) FROM takes WHERE user_id=t.user_id AND status='done' AND kind!='drill')"):
         jobs.put(("plan", r["id"]))
     for r in q("SELECT id FROM takes WHERE status IN ('queued','processing')" + (" OR status='nokey'" if coach_ready() else "") + " ORDER BY ts"):
         jobs.put(r["id"])

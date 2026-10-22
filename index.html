@@ -92,8 +92,8 @@ label.tog{display:inline-flex;gap:6px;align-items:center;font-size:14px;color:va
 .take .d{font-weight:600;font-variant-numeric:tabular-nums}
 .take .tag{font-size:12px;color:var(--muted)}
 .take audio{width:100%;height:36px}
-.take .x{margin-left:auto;font-size:13px;color:var(--muted);background:none;border:0;cursor:pointer;padding:6px}
-.take .x.sure{color:var(--rec);font-weight:600}
+.take .x,.drill .x{margin-left:auto;font-size:13px;color:var(--muted);background:none;border:0;cursor:pointer;padding:6px}
+.take .x.sure,.drill .x.sure{color:var(--rec);font-weight:600}
 .note{font-size:14px;color:var(--muted)}
 .empty{padding:16px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:14px}
 footer{margin-top:40px;color:var(--muted);font-size:13px;line-height:1.6}
@@ -123,6 +123,27 @@ footer a{color:inherit}
 .focus{display:grid;gap:2px;border-left:3px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;padding:10px 12px;margin:0 0 14px;font-size:15px}
 .focus .lbl{font:600 11px/1.3 var(--ui);text-transform:uppercase;letter-spacing:.05em;color:var(--accent)}
 .focus small{color:var(--muted);font-size:12px}
+.drill{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:12px 14px;margin:0 0 10px}
+.lesson .drill{margin:10px 0 0;background:var(--surface)}
+.drill .dh{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.drill .dh b{display:block;font-size:15.5px}
+.drill .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.drill details{margin:8px 0 0;font-size:14.5px}
+.drill summary{cursor:pointer;font-weight:600}
+.drill ol{margin:6px 0;padding-left:20px}
+.drill .bar{margin-top:10px}
+.dots{display:flex;gap:4px;padding-top:4px;flex:none}
+.dots i{width:10px;height:10px;border-radius:50%;background:var(--line);display:block}
+.dots i.got_it{background:var(--ok)} .dots i.almost{background:var(--accent)} .dots i.not_yet{background:var(--rec)}
+.att{display:grid;gap:6px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+.att audio{width:100%;height:36px}
+.att .fb{border:0;margin:0;padding:0}
+.grade{font-weight:600;margin-bottom:4px}
+.grade.got_it{color:var(--ok)} .grade.not_yet{color:var(--rec)} .grade.almost{color:var(--accent)}
+details.older{margin:8px 0}
+details.older > summary{cursor:pointer;font-size:14px;color:var(--muted);padding:4px 0}
+h3.sec{font:600 15px/1.3 var(--ui);margin:20px 0 10px}
+h4.sub{font:600 12px/1.3 var(--ui);text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:16px 0 8px}
 .lesson{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 10px}
 .lesson .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
 .lesson .lt{display:block;font-size:16px;margin:2px 0 8px}
@@ -263,8 +284,11 @@ const api = {
   take: async id => (await fetch("api/takes/" + encodeURIComponent(id))).json(),
   analyze: async id => (await fetch("api/takes/" + encodeURIComponent(id) + "/analyze", { method: "POST" })).json(),
   del: id => fetch("api/takes/" + encodeURIComponent(id), { method: "DELETE" }),
+  drills: async () => { try { const r = await fetch("api/drills"); return r.ok ? await r.json() : []; } catch { return []; } },
+  makeDrill: async (take_id, lesson) => (await fetch("api/drills", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ take_id, lesson }) })).json(),
+  delDrill: id => fetch("api/drills/" + encodeURIComponent(id), { method: "DELETE" }),
   async upload(t) {
-    const meta = { kind: t.kind, label: t.label, ts: t.ts, secs: t.secs, text: t.text || "", marks: t.marks || [] };
+    const meta = { kind: t.kind, label: t.label, ts: t.ts, secs: t.secs, text: t.text || "", marks: t.marks || [], drill_id: t.drill_id };
     const r = await fetch("api/takes", { method: "POST", body: t.blob,
       headers: { "Content-Type": t.blob.type || "audio/webm", "X-Take-Meta": encodeURIComponent(JSON.stringify(meta)) } });
     const out = await r.json();
@@ -283,9 +307,15 @@ async function flushLocal() {
 }
 let TAKES = [], PLAN = null;
 /* PLAN: what the coach set for this session, from your most recent review. */
-async function loadTakes() { TAKES = await api.takes(); PLAN = TAKES.find(t => t.plan)?.plan || null; return TAKES; }
+let DRILLS = [];
+async function loadTakes() {
+  [TAKES, DRILLS] = await Promise.all([api.takes(), api.drills()]);
+  PLAN = TAKES.find(t => t.plan)?.plan || null;
+  return TAKES;
+}
+const reads = () => TAKES.filter(t => t.kind !== "drill");
 function focusNote(text) {
-  if (!text) return null;
+  if (!text) return "";
   const d = new Date(PLAN.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
   return h("div", { class: "focus" }, h("span", { class: "lbl" }, "Today’s focus"), h("span", {}, text), h("small", {}, "From your coach, after your " + d + " read"));
 }
@@ -309,11 +339,12 @@ function recWidget(kind, meta, onSaved) {
       if (!blob) return;
       const take = { id: kind + ":" + Date.now(), kind, ts: Date.now(), secs: Math.round((Date.now() - t0) / 1000), blob, ...meta() };
       msg.textContent = "Saving…"; btn.disabled = true;
-      try { await api.upload(take); msg.textContent = "Saved. Your coach is listening; feedback appears below in a minute or two."; }
+      let saved = take;
+      try { saved = await api.upload(take); msg.textContent = kind === "drill" ? "" : "Saved. Your coach is listening; feedback appears below in a minute or two."; }
       catch (e) { await idb.put(take); msg.textContent = "Couldn't reach the server, so this take is saved on this device and will upload next time. (" + e.message + ")"; }
       btn.disabled = false;
       await loadTakes();
-      onSaved && onSaved(take);
+      onSaved && onSaved(saved);
     }
   });
   box.append(btn, msg);
@@ -335,13 +366,22 @@ function watch(id, paint) {
   }, 5000);
   polling.set(id, iv);
 }
-function feedbackPanel(t, audio, open) {
+function feedbackPanel(t, audio, open, onDone) {
   const el = h("div", { class: "fb" });
+  let waited = false;
   const paint = t => {
     el.innerHTML = "";
     if (t.status === "queued" || t.status === "processing") {
-      el.append(h("div", { class: "fbstate" }, t.status === "queued" ? "Waiting for the coach…" : "Coach is listening and writing notes (1 to 2 minutes)…"));
+      waited = true;
+      el.append(h("div", { class: "fbstate" }, t.kind === "drill" ? "Coach is listening…" : t.status === "queued" ? "Waiting for the coach…" : "Coach is listening and writing notes (1 to 2 minutes)…"));
       return watch(t.id, paint);
+    }
+    if (waited && onDone) { waited = false; return onDone(t); }
+    if (t.kind === "drill" && t.feedback) {
+      const g = GRADES[t.feedback.grade] || GRADES.almost;
+      el.append(h("div", { class: "grade " + t.feedback.grade }, g[0] + " " + g[1]), h("p", {}, rich(t.feedback.note, audio)),
+        t.feedback.tip ? h("p", { class: "try" }, rich(t.feedback.tip, audio)) : null);
+      return;
     }
     if (t.status === "nokey") { el.append(h("div", { class: "fbstate" }, "Feedback isn't switched on yet (no coach API key on the server). This take will be reviewed automatically once it is.")); return; }
     if (t.status === "error") {
@@ -355,7 +395,7 @@ function feedbackPanel(t, audio, open) {
       h("div", { class: "pills" }, SKILLS.map(([k, n]) => h("span", { class: "pill" }, n + " ", h("b", {}, f.scores?.[k] ?? "–"), "/5")),
       ),
       f.progress ? [h("h4", {}, "Since last time"), h("p", {}, rich(f.progress, audio))] : null,
-      f.lessons?.length ? [h("h4", {}, "Lessons"), ...f.lessons.map(l => lesson(l, audio))]
+      f.lessons?.length ? [h("h4", {}, "Lessons"), ...f.lessons.map((l, i) => lesson(l, audio, t, i))]
         : f.priorities?.length ? [h("h4", {}, "Work on next"), h("ul", {}, f.priorities.map(p => h("li", {}, rich(p, audio))))] : null,
       f.strengths?.length ? [h("h4", {}, "Working well"), h("ul", {}, f.strengths.map(p => h("li", {}, rich(p, audio))))] : null,
       f.moments?.length ? [h("h4", {}, "Moment by moment"), ...f.moments.map(m => moment(m, audio))] : null,
@@ -395,8 +435,12 @@ function rich(text, audio) {
   out.push((text || "").slice(last));
   return out;
 }
-/* One lesson: what the coach hears, why, and the exercise that fixes it. */
-function lesson(l, audio) {
+/* One lesson: what the coach hears, why, and the exercise that fixes it. "Practice this now" turns it into a drill. */
+function lesson(l, audio, t, i) {
+  const slot = h("div", {});
+  const existing = DRILLS.find(d => d.id === t.id + "-L" + i);
+  const open = async () => { const d = existing || await api.makeDrill(t.id, i); if (!existing) await loadTakes(); slot.replaceChildren(drillCard(d, { inLesson: true })); };
+  slot.append(h("button", { class: "btn", type: "button", style: "margin-top:10px", onclick: open }, existing ? "Practice this drill" : "Practice this now"));
   return h("div", { class: "lesson" },
     h("div", { class: "k" }, l.area), h("b", { class: "lt" }, l.title),
     h("p", {}, rich(l.hear, audio)),
@@ -404,7 +448,47 @@ function lesson(l, audio) {
     h("div", { class: "ex" },
       h("div", {}, h("span", { class: "lbl" }, "Exercise: "), h("b", {}, l.exercise), l.dose ? h("span", { class: "note" }, " · " + l.dose) : null),
       l.steps?.length ? h("ol", {}, l.steps.map(x => h("li", {}, rich(x, audio)))) : null,
-      l.feel ? h("p", { class: "note" }, h("span", { class: "lbl" }, "When it’s working: "), rich(l.feel, audio)) : null));
+      l.feel ? h("p", { class: "note" }, h("span", { class: "lbl" }, "When it’s working: "), rich(l.feel, audio)) : null),
+    slot);
+}
+
+/* ---------- drills ----------
+   A drill is one lesson's exercise, practised on its own. Record an attempt and the coach grades it.
+   Attempts made when it's due move the schedule (1, 2, 4, 8 days); five passes in a row and it's learned. */
+const GRADES = { got_it: ["✓", "Got it"], almost: ["◐", "Almost"], not_yet: ["✗", "Not yet"] };
+const dueNow = d => d.status === "active" && d.due * 1000 <= Date.now();
+function drillCard(d, opts = {}) {
+  const box = h("div", { class: "drill" });
+  const paint = d => {
+    const att = d.attempts || [], last = att[att.length - 1], l = d.lesson;
+    const when = d.status === "graduated" ? "Learned" : dueNow(d) ? "Due today"
+      : "Next " + new Date(d.due * 1000).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+    const del = h("button", { class: "x", type: "button" }, "Remove");
+    del.addEventListener("click", async () => {
+      if (!del.classList.contains("sure")) { del.classList.add("sure"); del.textContent = "Tap to confirm"; setTimeout(() => { del.classList.remove("sure"); del.textContent = "Remove"; }, 3000); return; }
+      await api.delDrill(d.id); await loadTakes(); box.remove();
+    });
+    box.replaceChildren(...[
+      h("div", { class: "dh" }, h("div", {}, h("div", { class: "k" }, l.area + " · " + when), h("b", {}, d.title)),
+        h("div", { class: "dots", title: att.map(a => GRADES[a.feedback?.grade]?.[1] || "…").join(", ") },
+          att.slice(-8).map(a => h("i", { class: a.feedback?.grade || "pending" })))),
+      h("details", { open: !att.length || opts.inLesson },
+        h("summary", {}, l.exercise), l.steps?.length ? h("ol", {}, l.steps.map(x => h("li", {}, x.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")))) : null,
+        l.feel ? h("p", { class: "note" }, "When it’s working: " + l.feel.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")) : null),
+      recWidget("drill", () => ({ label: d.title, drill_id: d.id }), async () => { await loadTakes(); paint(DRILLS.find(x => x.id === d.id) || d); }),
+      last ? attemptRow(last, () => api.drills().then(ds => { DRILLS = ds; paint(ds.find(x => x.id === d.id) || d); })) : null,
+      att.length > 1 ? h("details", { class: "older" }, h("summary", {}, (att.length - 1) + " earlier attempt" + (att.length > 2 ? "s" : "")),
+        att.slice(0, -1).reverse().map(a => attemptRow(a))) : null,
+      opts.inLesson ? null : h("div", { class: "bar", style: "margin-top:4px" }, del)].filter(Boolean));
+  };
+  paint(d);
+  return box;
+}
+function attemptRow(t, onDone) {
+  const audio = h("audio", { controls: true, preload: "none", src: "api/takes/" + encodeURIComponent(t.id) + "/audio" });
+  return h("div", { class: "att" },
+    h("span", { class: "note" }, new Date(t.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " · " + fmt(t.secs)),
+    audio, feedbackPanel(t, audio, true, onDone));
 }
 /* One timestamped note. Its button plays just that span of your recording. */
 function moment(m, audio) {
@@ -544,7 +628,7 @@ function paintNav() {
   const nav = $("#steps"); nav.innerHTML = ""; const done = dayLog()[today()] || [];
   for (const s of STEPS) {
     const b = h("button", { type: "button", "aria-current": String(s.id === current), class: done.includes(s.id) ? "done" : "" },
-      h("span", {}, s.name), h("small", {}, s.mins ? s.mins + " min" : s.id === "coach" ? TAKES.length + " takes" : weekDue() ? "due" : "1× a week"));
+      h("span", {}, s.name), h("small", {}, s.mins ? s.mins + " min" : s.id === "coach" ? (DRILLS.some(dueNow) ? DRILLS.filter(dueNow).length + (DRILLS.filter(dueNow).length === 1 ? " drill due" : " drills due") : reads().length + " takes") : weekDue() ? "due" : "1× a week"));
     b.addEventListener("click", () => go(s.id));
     nav.append(b);
   }
@@ -589,7 +673,9 @@ function renderWarm(v, standard) {
   });
   const swap = moves === WARMUP ? (PLAN?.warmup?.length ? h("button", { class: "linkbtn", type: "button", onclick: () => { cleanup(); v.innerHTML = ""; renderWarm(v); } }, "Use my coach’s warm-up") : null)
     : h("button", { class: "linkbtn", type: "button", onclick: () => { cleanup(); v.innerHTML = ""; renderWarm(v, true); } }, "Use the standard warm-up instead");
-  v.append(wrap, list, h("div", { class: "bar" }, nextBtn("warm"), swap));
+  const due = DRILLS.filter(dueNow).slice(0, 3);
+  v.append(wrap, ...(due.length ? [h("h4", { class: "sub" }, "Due drills"), ...due.map(d => drillCard(d)), h("h4", { class: "sub" }, "Then")] : []),
+    list, h("div", { class: "bar" }, nextBtn("warm"), swap ?? ""));
   cleanup = () => timer.stop();
 }
 
@@ -767,10 +853,16 @@ function renderWeek(v) {
 
 /* Progress: score trends across every reviewed take, then every take with its notes. */
 function renderProgress(v) {
-  const done = TAKES.filter(t => t.status === "done" && t.feedback).slice().reverse();
+  const done = reads().filter(t => t.status === "done" && t.feedback?.scores).slice().reverse();
   v.append(h("div", { class: "head" }, h("h2", {}, "Progress")),
     h("p", { class: "how" }, "Every recording you make is kept here with your coach’s notes. Scores are 1 to 5; tap a timestamp to hear that moment."),
     uploadWidget(() => go("coach")));
+  if (DRILLS.length) {
+    const active = DRILLS.filter(d => d.status === "active").sort((a, b) => a.due - b.due), learned = DRILLS.filter(d => d.status !== "active");
+    v.append(h("h3", { class: "sec" }, "Drills"), ...active.map(d => drillCard(d)),
+      learned.length ? h("details", { class: "older" }, h("summary", {}, "Learned (" + learned.length + ")"), learned.map(d => drillCard(d))) : "",
+      h("h3", { class: "sec" }, "Recordings"));
+  }
   if (done.length) {
     const grid = h("div", { class: "sparks" });
     for (const [k, n] of SKILLS) grid.append(spark(n, done.map(t => ({ ts: t.ts, y: t.feedback.scores?.[k] })), 1, 5));
@@ -779,8 +871,8 @@ function renderProgress(v) {
     v.append(grid);
   }
   const list = h("div", { class: "takes" });
-  if (!TAKES.length) list.append(h("div", { class: "empty" }, "No recordings yet. Record yourself in the Read step and your coach’s notes will show up here."));
-  TAKES.forEach((t, i) => list.append(takeRow(t, () => go("coach"), t.kind === "weekly" ? "Weekly" : t.kind === "upload" ? "Uploaded" : null, i === 0)));
+  if (!reads().length) list.append(h("div", { class: "empty" }, "No recordings yet. Record yourself in the Read step and your coach’s notes will show up here."));
+  reads().forEach((t, i) => list.append(takeRow(t, () => go("coach"), t.kind === "weekly" ? "Weekly" : t.kind === "upload" ? "Uploaded" : null, i === 0)));
   v.append(list);
 }
 /* One skill over time: a single-series sparkline (latest value large, a dot per session, hover for date). */
