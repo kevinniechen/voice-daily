@@ -18,7 +18,7 @@ GEMINI_MODELS direct from Google. If none answer, Claude reads the measurements 
   PORT             default 8000
   DAILY_LIMIT      reviews + drill grades per person per day, default 60
 """
-import base64, hashlib, json, secrets, mimetypes, os, queue, re, sqlite3, subprocess, threading, time, traceback, urllib.error, urllib.request, uuid
+import base64, hashlib, json, secrets, shutil, mimetypes, os, queue, re, sqlite3, subprocess, threading, time, traceback, urllib.error, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, quote, unquote
 
@@ -38,11 +38,13 @@ MODEL = LISTENERS[0][1] if LISTENERS else CLAUDE_MODEL
 def coach_ready(): return True
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "60"))
 IMPORT_ORIGINS = {"https://kevinniechen.github.io"}
-GUEST_COOKIE = "vd_guest"
+GUEST_COOKIE = "vd_guest"   # the device's session cookie (guests and Apple sign-ins)
+APPLE_CLIENT_IDS = [x for x in os.environ.get("APPLE_CLIENT_IDS", "com.kevchn.tenminutevoice").split(",") if x]
 GUESTS_PER_IP_DAY = int(os.environ.get("GUESTS_PER_IP_DAY", "10"))
 GUEST_REVIEWS_DAY = int(os.environ.get("GUEST_REVIEWS_DAY", "300"))  # all guests together, to protect the model budget
 IMPORT_TOKENS = {}  # token -> (user_id, expires)
 STATIC = {"/": "index.html", "/index.html": "index.html", "/books.json": "books.json", "/manifest.webmanifest": "manifest.webmanifest",
+          "/privacy": "privacy.html", "/terms": "terms.html",
           "/icon-192.png": "icon-192.png", "/icon-512.png": "icon-512.png", "/apple-touch-icon.png": "apple-touch-icon.png"}
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 os.makedirs(os.path.join(DATA, "audio"), exist_ok=True)
@@ -76,7 +78,8 @@ for ddl in (  # added after launch; each is a no-op once applied. Tables first, 
         "ALTER TABLE drills ADD COLUMN level INTEGER DEFAULT 0",      # review passes
         "ALTER TABLE drills ADD COLUMN flags INTEGER DEFAULT 1",      # how many reviews raised this habit
         "ALTER TABLE users ADD COLUMN guest_hash TEXT",               # guests: sha256 of their device cookie
-        "ALTER TABLE users ADD COLUMN ip TEXT"):
+        "ALTER TABLE users ADD COLUMN ip TEXT",
+        "CREATE TABLE sessions(token_hash TEXT PRIMARY KEY, user_id TEXT, created INTEGER)"):  # device sign-ins (guests, Apple)
     try: db.execute(ddl)
     except sqlite3.OperationalError: pass
 
@@ -392,7 +395,8 @@ def ask_listeners(prompt, audios, schema=None):
 def call_openrouter(model, prompt, audio_b64, schema=None):
     body = {
         "model": model, "max_tokens": 32000, "reasoning": {"effort": "high"},
-        "provider": {"require_parameters": True},   # only providers that honour response_format; others let the model ramble
+        # only providers that honour response_format (others let the model ramble) and that don't keep or train on the data
+        "provider": {"require_parameters": True, "data_collection": "deny"},
         "messages": [{"role": "user", "content": [
             *[{"type": "input_audio", "input_audio": {"data": a, "format": "mp3"}} for a in ([audio_b64] if isinstance(audio_b64, str) else audio_b64)],
             {"type": "text", "text": prompt}]}],
@@ -746,10 +750,26 @@ def worker():
             else: analyze(tid)
         finally: jobs.task_done()
 
+_apple_keys = {"at": 0, "set": None}
+def verify_apple(token, nonce):
+    """Check an Apple identity token: signed by Apple's current keys, for our app, unexpired, with our nonce."""
+    import jwt
+    if not token: raise ValueError("no token")
+    if time.time() - _apple_keys["at"] > 3600:
+        with urllib.request.urlopen("https://appleid.apple.com/auth/keys", timeout=10) as r: _apple_keys["set"] = json.load(r)
+        _apple_keys["at"] = time.time()
+    kid = jwt.get_unverified_header(token).get("kid")
+    jwk = next((k for k in _apple_keys["set"]["keys"] if k["kid"] == kid), None)
+    if not jwk: raise ValueError("unknown signing key")
+    claims = jwt.decode(token, jwt.PyJWK(jwk).key, algorithms=["RS256"], audience=APPLE_CLIENT_IDS, issuer="https://appleid.apple.com")
+    if nonce and claims.get("nonce") not in (nonce, hashlib.sha256(nonce.encode()).hexdigest()): raise ValueError("nonce mismatch")
+    return claims
+
 def merge_user(src, dst):
     """A guest signed in: move their recordings, focuses, lessons and practice days into the account."""
     if src == dst: return
     for t in ("takes", "drills", "lessons"): q("UPDATE %s SET user_id=? WHERE user_id=?" % t, (dst, src))
+    q("DELETE FROM sessions WHERE user_id=?", (src,))
     a, b = os.path.join(DATA, "audio", src), os.path.join(DATA, "audio", dst)
     if os.path.isdir(a):
         os.makedirs(b, exist_ok=True)
@@ -790,14 +810,43 @@ class H(BaseHTTPRequestHandler):
             email = self.headers.get("X-ExeDev-Email", "")
             q("INSERT INTO users(id,email,created) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email", (uid, email, int(time.time())))
             if tok:
-                g = q("SELECT id FROM users WHERE guest_hash=?", (hashlib.sha256(tok.encode()).hexdigest(),), one=True)
+                th = hashlib.sha256(tok.encode()).hexdigest()
+                g = q("SELECT user_id id FROM sessions WHERE token_hash=? AND user_id LIKE 'guest-%'", (th,), one=True) or \
+                    q("SELECT id FROM users WHERE guest_hash=?", (th,), one=True)
                 if g: merge_user(g["id"], uid)
+                q("DELETE FROM sessions WHERE token_hash=?", (th,))
                 self._cookie = GUEST_COOKIE + "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
             return {"id": uid, "email": email, "guest": False}
         if tok:
-            g = q("SELECT id FROM users WHERE guest_hash=?", (hashlib.sha256(tok.encode()).hexdigest(),), one=True)
+            th = hashlib.sha256(tok.encode()).hexdigest()
+            sess = q("SELECT u.id, u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?", (th,), one=True)
+            if sess: return {"id": sess["id"], "email": sess["email"] or "", "guest": sess["id"].startswith("guest-")}
+            g = q("SELECT id FROM users WHERE guest_hash=?", (th,), one=True)
             if g: return {"id": g["id"], "email": "", "guest": True}
         return None
+
+    def start_session(self, uid):
+        tok = secrets.token_urlsafe(32)
+        q("INSERT INTO sessions(token_hash,user_id,created) VALUES(?,?,?)", (hashlib.sha256(tok.encode()).hexdigest(), uid, int(time.time())))
+        self._cookie = GUEST_COOKIE + "=" + tok + "; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax"
+
+    def apple_signin(self):
+        """Sign in with Apple from the iOS app: verify Apple's signed identity token, then sign this device in.
+        Whatever the guest on this device did moves into the account."""
+        try: a = json.loads(self.body(1 << 16))
+        except Exception: return self.send(400, {"error": "bad request"})
+        try: claims = verify_apple(a.get("token", ""), a.get("nonce", ""))
+        except Exception as e: return self.send(401, {"error": "Apple sign-in failed: %s" % e})
+        uid = "apple-" + hashlib.sha256(claims["sub"].encode()).hexdigest()[:20]
+        email = claims.get("email", "")
+        q("INSERT INTO users(id,email,created) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET email=CASE WHEN excluded.email!='' THEN excluded.email ELSE users.email END",
+          (uid, email, int(time.time())))
+        cur = self.user()
+        if cur and cur["guest"]: merge_user(cur["id"], uid)
+        tok = self.guest_token()
+        if tok: q("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(tok.encode()).hexdigest(),))
+        self.start_session(uid)
+        return self.send(200, {"id": uid, "email": email, "guest": False})
 
     def client_ip(self):
         return (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[-1].strip()  # the proxy appends the real one; earlier entries are client-supplied
@@ -808,8 +857,8 @@ class H(BaseHTTPRequestHandler):
         if n >= GUESTS_PER_IP_DAY: return None
         tok = secrets.token_urlsafe(32)
         gid = "guest-" + secrets.token_hex(8)
-        q("INSERT INTO users(id,email,created,guest_hash,ip) VALUES(?,?,?,?,?)", (gid, "", int(time.time()), hashlib.sha256(tok.encode()).hexdigest(), ip))
-        self._cookie = GUEST_COOKIE + "=" + tok + "; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax"
+        q("INSERT INTO users(id,email,created,ip) VALUES(?,?,?,?)", (gid, "", int(time.time()), ip))
+        self.start_session(gid)
         return {"id": gid, "email": "", "guest": True}
 
     def send(self, code, body=b"", ctype="application/json", headers=None):
@@ -859,6 +908,9 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path); p = u.path
         if p in STATIC or (p.startswith("/audio/") and re.fullmatch(r"/audio/[a-z0-9_-]+\.mp3", p)):
+            if p in ("/privacy", "/terms"):   # legal pages carry the contact address from the environment
+                with open(os.path.join(APP, STATIC[p])) as f:
+                    return self.send(200, f.read().replace("{{CONTACT}}", os.environ.get("CONTACT_EMAIL", "the contact address on our App Store page")), "text/html; charset=utf-8")
             return self.send_file(os.path.join(APP, STATIC.get(p, p.lstrip("/"))),
                                   cache="public, max-age=86400" if p.startswith("/audio/") else "no-cache")
         if not p.startswith("/api/"): return self.send(404, {"error": "not found"})
@@ -932,6 +984,12 @@ class H(BaseHTTPRequestHandler):
                   (me["id"], json.dumps(merged), int(time.time())))
                 return self.send(200, {"ok": True}, headers=self.cors())
             return self.send(404, {"error": "not found"}, headers=self.cors())
+        if p == "/api/apple": return self.apple_signin()
+        if p == "/api/signout":
+            tok = self.guest_token()
+            if tok: q("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(tok.encode()).hexdigest(),))
+            self._cookie = GUEST_COOKIE + "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+            return self.send(200, {"ok": True})
         if p == "/api/guest":
             me = self.user() or self.new_guest()
             return self.send(200, me) if me else self.send(429, {"error": "Too many new accounts from this network today. Try again tomorrow, or sign in."})
@@ -1044,6 +1102,12 @@ class H(BaseHTTPRequestHandler):
     def do_DELETE(self):
         me = self.user()
         if not me: return self.send(401, {"error": "login required"})
+        if urlparse(self.path).path == "/api/account":   # everything: recordings, notes, focuses, lessons, settings
+            for t in ("takes", "drills", "lessons", "state", "sessions"): q("DELETE FROM %s WHERE user_id=?" % t, (me["id"],))
+            q("DELETE FROM users WHERE id=?", (me["id"],))
+            shutil.rmtree(os.path.join(DATA, "audio", me["id"]), ignore_errors=True)
+            self._cookie = GUEST_COOKIE + "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+            return self.send(200, {"ok": True})
         m = re.fullmatch(r"/api/drills/([\w:.-]+)", urlparse(self.path).path)
         if m:  # removes the drill and its practice recordings
             for t in q("SELECT * FROM takes WHERE drill_id=? AND user_id=?", (m[1], me["id"])): self.remove_take(t)

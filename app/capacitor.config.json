@@ -1,0 +1,24 @@
+{
+  "appId": "com.kevchn.tenminutevoice",
+  "appName": "Ten Minute Voice",
+  "webDir": "www",
+  "server": {
+    "url": "https://voice-daily.exe.xyz",
+    "cleartext": false,
+    "errorPath": "index.html",
+    "allowNavigation": [
+      "exe.dev",
+      "*.exe.dev"
+    ]
+  },
+  "ios": {
+    "contentInset": "never",
+    "limitsNavigationsToAppBoundDomains": true,
+    "backgroundColor": "#f6f7f9"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "iconColor": "#2f54d4"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "voice-daily-app",
+  "private": true,
+  "version": "1.0.0",
+  "description": "iOS shell for Ten Minute Voice (Capacitor). The app loads https://voice-daily.exe.xyz and adds native microphone, reminders and Sign in with Apple.",
+  "scripts": {
+    "sync": "cap sync ios",
+    "open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor-community/apple-sign-in": "^7.1.0",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/ios": "^8.5.3",
+    "@capacitor/local-notifications": "^8.3.1"
+  }
+}

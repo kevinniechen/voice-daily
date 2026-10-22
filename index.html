@@ -305,6 +305,15 @@ details.older{margin:8px 0}
 details.older > summary{cursor:pointer;font-size:14px;color:var(--muted);padding:4px 0}
 h3.sec{font:600 15px/1.3 var(--ui);margin:20px 0 10px}
 h4.sub{font:600 12px/1.3 var(--ui);text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:16px 0 8px}
+.consent{position:fixed;inset:0;z-index:20;background:rgba(10,14,20,.45);display:flex;align-items:flex-end;justify-content:center;opacity:0;transition:opacity .25s}
+.consent.open{opacity:1}
+.consent-in{background:var(--surface);width:100%;max-width:640px;border-radius:22px 22px 0 0;padding:24px 20px calc(18px + env(safe-area-inset-bottom,0px));
+  display:grid;gap:10px;transform:translateY(30px);transition:transform .3s cubic-bezier(.2,.8,.2,1)}
+.consent.open .consent-in{transform:none}
+.consent h2{font:700 22px/1.25 var(--ui);margin:0} .consent p{margin:0;font-size:15.5px}
+.linkbtn.danger{color:var(--rec)}
+.apple-btn{all:unset;cursor:pointer;flex:none;min-height:44px;padding:0 16px;border-radius:12px;background:#000;color:#fff;font:600 15px/44px -apple-system,system-ui,sans-serif}
+@media (prefers-color-scheme:dark){.apple-btn{background:#fff;color:#000}}
 .lesson{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 10px}
 .lesson .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
 .lesson .lt{display:block;font-size:16px;margin:2px 0 8px}
@@ -510,12 +519,54 @@ function sessionOf(t) {
   const same = TAKES.filter(x => x.kind === "daily" && dayKey(x.ts) === dayKey(t.ts));
   return same.length > 1 ? "Session " + (same.filter(x => x.ts <= t.ts).length) : "";
 }
+/* ---------- running inside the iOS app (Capacitor): Sign in with Apple, daily reminders ---------- */
+const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const plugin = name => window.Capacitor?.Plugins?.[name];
+async function signInWithApple() {
+  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+  try {
+    const res = await plugin("SignInWithApple").authorize({ clientId: "com.kevchn.tenminutevoice", redirectURI: location.origin + "/",
+      scopes: "email name", state: nonce, nonce });
+    const r = await fetch("api/apple", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: res.response.identityToken, nonce }) });
+    if (!r.ok) throw new Error((await r.json()).error);
+    location.reload();
+  } catch (e) { if (!/cancel/i.test(String(e?.message || e))) alert("Couldn’t sign in with Apple. " + (e?.message || "")); }
+}
+/* After a finished lesson in the app: offer a daily reminder at this time of day (once). */
+async function offerReminder() {
+  const ln = plugin("LocalNotifications");
+  if (!NATIVE || !ln || store.get("reminderAsked")) return;
+  store.set("reminderAsked", true);
+  if (!confirm("Want a reminder to practise at this time each day?")) return;
+  if ((await ln.requestPermissions()).display !== "granted") return;
+  const now = new Date();
+  await ln.schedule({ notifications: [{ id: 1, title: "Time for your voice lesson", body: "Six minutes. Your coach has today’s focus ready.",
+    schedule: { on: { hour: now.getHours(), minute: now.getMinutes() }, repeats: true, allowWhileIdle: true } }] });
+  store.set("reminder", now.getHours() + ":" + now.getMinutes());
+}
+
+/* Before the first recording: say plainly where recordings go, and get a yes. */
+function askConsent() {
+  return new Promise(done => {
+    const el = h("div", { class: "consent", role: "dialog", "aria-modal": "true", "aria-labelledby": "consent-h" });
+    const close = ok => { if (ok) store.set("aiConsent", Date.now()); el.classList.remove("open"); setTimeout(() => el.remove(), 300); done(ok); };
+    el.append(h("div", { class: "consent-in" },
+      h("h2", { id: "consent-h" }, "Your coach is an AI"),
+      h("p", {}, "To write your notes, your recordings and their transcripts are sent to Google’s Gemini (through OpenRouter), and sometimes to Anthropic’s Claude. They’re stored on our server so you can replay them."),
+      h("p", {}, "They’re never sold or used for ads, and you can delete everything any time in Journey."),
+      h("p", { class: "note" }, h("a", { href: "/privacy", target: "_blank", rel: "noopener" }, "Privacy details")),
+      h("div", { class: "sheet-actions" }, h("button", { class: "btn2", type: "button", onclick: () => close(false) }, "Not now"),
+        h("button", { class: "cta", type: "button", onclick: () => close(true) }, "Agree and record"))));
+    document.body.append(el); requestAnimationFrame(() => el.classList.add("open"));
+  });
+}
 /* Record → Stop → save, as a small state machine any button can drive. state: idle | live | saving. */
 function makeRecorder(kind, meta, onSaved, onStart, onChange) {
   const r = { state: "idle", t0: 0, msg: "", get elapsed() { return (Date.now() - this.t0) / 1000; } };
   let iv;
   r.toggle = async () => {
     if (r.state === "saving") return;
+    if (r.state === "idle" && !store.get("aiConsent")) { if (!(await askConsent())) return; }
     if (r.state === "idle") {
       try { await recorder.start(); }
       catch { r.msg = "Microphone blocked. Allow it in your browser’s site settings, then try again."; return onChange(); }
@@ -659,8 +710,8 @@ function feedbackPanel(t, audio, open, onDone) {
     }
     if (t.status === "nokey") { el.append(h("div", { class: "fbstate" }, "Feedback isn't switched on yet (no coach API key on the server). This take will be reviewed automatically once it is.")); return; }
     if (t.status === "error") {
-      el.append(h("div", { class: "fbstate err" }, "Feedback failed: " + (t.error || "unknown error")),
-        h("button", { class: "linkbtn", type: "button", onclick: async () => paint(await api.analyze(t.id)) }, "Try again"));
+      el.append(h("div", { class: "fbstate err" }, "Didn’t catch that. " + (/hear|audible|transcribe/i.test(t.error || "") ? "Try again a little closer to your phone." : /limit|busy/i.test(t.error || "") ? t.error : "Something went wrong grading it.")),
+        /hear|audible|transcribe|limit/i.test(t.error || "") ? "" : h("button", { class: "linkbtn", type: "button", onclick: async () => paint(await api.analyze(t.id)) }, "Try grading again"));
       return;
     }
     const f = t.feedback; if (!f) return;
@@ -696,6 +747,7 @@ function playSpan(audio, start, end, el) {
 }
 /* Coach text with [words](start-end) links turned into buttons that play that moment. */
 function rich(text, audio) {
+  text = (text || "").replace(/`([^`]+)`/g, "$1").replace(/\*\*([^*]+)\*\*/g, "$1");   // the coach sometimes adds markdown
   const out = [], re = /\[([^\]]+)\]\(\s*(\d+(?:\.\d+)?)\s*(?:[-\u2013]\s*(\d+(?:\.\d+)?))?\s*s?\s*\)/g;
   let last = 0, m;
   while ((m = re.exec(text || ""))) {
@@ -1158,7 +1210,7 @@ function celebrate(v, L) {
     h("h2", {}, "Lesson " + L.n + " complete"),
     h("p", { class: "how" }, streak() > 1 ? streak() + " days in a row. See you tomorrow." : "Day one. See you tomorrow."),
     L.focus ? h("p", { class: "note" }, L.focus.title + ": " + (DRILLS.find(d => d.id === L.focus.id)?.passes ?? L.focus.passes) + " of 3 days passed") : ""),
-    h("div", { class: "dock" }, h("button", { class: "cta", type: "button", onclick: () => { exitLesson(); go("today"); } }, "Done")));
+    h("div", { class: "dock" }, h("button", { class: "cta", type: "button", onclick: () => { exitLesson(); go("today"); offerReminder(); } }, "Done")));
 }
 /* Today after the lesson: what you did, with the coach's notes as they arrive. */
 function lessonDone(v, L) {
@@ -1351,7 +1403,8 @@ function renderJourney(v) {
   v.append(h("div", { class: "head" }, h("h2", {}, "Journey")), installCard(),
     ME?.guest ? h("div", { class: "card install", style: "margin:0 0 14px;padding:14px 16px" },
       h("p", {}, "Your progress is saved on this device. Sign in to keep it on all your devices."),
-      h("a", { class: "btn2", href: "api/signin", style: "min-height:44px;padding:0 16px;flex:none" }, "Sign in")) : "",
+      NATIVE && plugin("SignInWithApple") ? h("button", { class: "apple-btn", type: "button", onclick: signInWithApple }, " Sign in with Apple")
+        : h("a", { class: "btn2", href: "api/signin", style: "min-height:44px;padding:0 16px;flex:none" }, "Sign in")) : "",
     h("div", { class: "stats" },
       h("div", { class: "stat" }, h("b", {}, "🔥 " + streak()), h("span", {}, "day streak")),
       h("div", { class: "stat" }, h("b", {}, LESSONS.filter(l => l.status === "done").length), h("span", {}, "lessons")),
@@ -1384,6 +1437,17 @@ function renderJourney(v) {
   const other = reads().filter(t => !t.lesson_id);
   if (other.length) v.append(h("details", { class: "older" }, h("summary", {}, "Other recordings (" + other.length + ")"),
     h("div", { class: "takes" }, other.map(t => takeRow(t, () => go("journey"), t.kind === "weekly" ? "Weekly" : t.kind === "upload" ? "Uploaded" : "Practice", false)))));
+  const del = h("button", { class: "linkbtn danger", type: "button" }, "Delete my account and recordings");
+  del.onclick = async () => {
+    if (!confirm("Delete your account? This permanently deletes all your recordings, notes, lessons and progress.")) return;
+    await fetch("api/account", { method: "DELETE" });
+    try { Object.keys(localStorage).filter(k => k.startsWith("tmv:")).forEach(k => localStorage.removeItem(k)); } catch {}
+    location.reload();
+  };
+  setTimeout(() => v.append(h("h3", { class: "sec" }, "Account"),
+    h("p", { class: "note" }, ME?.guest ? "Guest account on this device." : "Signed in as " + (ME?.email || "you") + ".", " ",
+      h("a", { href: "/privacy", target: "_blank", rel: "noopener" }, "Privacy"), " · ", h("a", { href: "/terms", target: "_blank", rel: "noopener" }, "Terms"),
+      ME?.id?.startsWith("apple-") ? [" · ", h("a", { href: "#", onclick: async e => { e.preventDefault(); await fetch("api/signout", { method: "POST" }); location.reload(); } }, "Sign out")] : ""), del), 0);
   const scored = reads().filter(t => t.status === "done" && t.feedback?.scores).slice().reverse();
   if (scored.length > 1) {
     const grid = h("div", { class: "sparks" });
