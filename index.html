@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,400;7..72,600&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-/* Layout: one narrow column; a four-step strip on top, the active step below, one big action button per step. */
+/* Layout: one narrow column; a step strip on top, the active step below, one big action button per step. */
 :root{
   --bg:#f6f7f9; --surface:#ffffff; --ink:#16202c; --muted:#5f6b7a; --line:#dfe3e9;
   --accent:#2f54d4; --accent-soft:#e6ecff; --rec:#d6334a; --ok:#1f8a5b;
@@ -120,6 +120,20 @@ footer a{color:inherit}
 .mo .try{color:var(--ink)}
 .mo .try::before{content:"Try: ";font-weight:600}
 .mo.playing{background:var(--accent-soft);border-radius:10px;padding-inline:8px;margin-inline:-8px}
+.lesson{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 10px}
+.lesson .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.lesson .lt{display:block;font-size:16px;margin:2px 0 8px}
+.lesson p{margin:0 0 8px}
+.lesson .lbl{font-weight:600}
+.lesson .ex{background:var(--accent-soft);border-radius:10px;padding:10px 12px}
+.lesson .ex ol{margin:8px 0 6px;padding-left:20px}
+.lesson .ex li{margin:3px 0}
+.lesson .ex p{margin:6px 0 0}
+.cite{font:inherit;font-family:var(--read);font-style:italic;color:var(--ink);background:var(--accent-soft);border:0;border-radius:6px;
+  padding:1px 6px;margin:0 1px;cursor:pointer;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.cite span{font:600 11.5px/1 var(--ui);font-style:normal;color:var(--accent);margin-left:5px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cite:hover,.cite.playing{background:var(--accent);color:var(--bg)}
+.cite:hover span,.cite.playing span{color:var(--bg)}
 .fbstate{font-size:14px;color:var(--muted)}
 .fbstate.err{color:var(--rec)}
 .linkbtn{background:none;border:0;color:var(--accent);font:inherit;font-size:14px;cursor:pointer;padding:6px 0}
@@ -328,14 +342,15 @@ function feedbackPanel(t, audio, open) {
     }
     const f = t.feedback; if (!f) return;
     const body = h("div", {},
-      h("h4", {}, "Overall"), h("p", {}, f.summary),
+      h("h4", {}, "Overall"), h("p", {}, rich(f.summary, audio)),
       h("div", { class: "pills" }, SKILLS.map(([k, n]) => h("span", { class: "pill" }, n + " ", h("b", {}, f.scores?.[k] ?? "–"), "/5")),
-        f.wpm ? h("span", { class: "pill" }, h("b", {}, f.wpm), " wpm") : null),
-      f.progress ? [h("h4", {}, "Since last time"), h("p", {}, f.progress)] : null,
-      f.priorities?.length ? [h("h4", {}, "Work on next"), h("ul", {}, f.priorities.map(p => h("li", {}, p)))] : null,
-      f.strengths?.length ? [h("h4", {}, "Working well"), h("ul", {}, f.strengths.map(p => h("li", {}, p)))] : null,
+      ),
+      f.progress ? [h("h4", {}, "Since last time"), h("p", {}, rich(f.progress, audio))] : null,
+      f.lessons?.length ? [h("h4", {}, "Lessons"), ...f.lessons.map(l => lesson(l, audio))]
+        : f.priorities?.length ? [h("h4", {}, "Work on next"), h("ul", {}, f.priorities.map(p => h("li", {}, rich(p, audio))))] : null,
+      f.strengths?.length ? [h("h4", {}, "Working well"), h("ul", {}, f.strengths.map(p => h("li", {}, rich(p, audio))))] : null,
       f.moments?.length ? [h("h4", {}, "Moment by moment"), ...f.moments.map(m => moment(m, audio))] : null,
-      f.drill ? [h("h4", {}, "Tomorrow’s drill"), h("p", {}, f.drill)] : null,
+      f.drill ? [h("h4", {}, "Tomorrow’s warm-up"), h("p", {}, rich(f.drill, audio))] : null,
       h("div", { class: "bar", style: "margin-top:6px" },
         h("button", { class: "linkbtn", type: "button", onclick: async () => { if (confirm("Ask the coach for a fresh review of this take?")) paint(await api.analyze(t.id)); } }, "Re-review"),
         t.model ? h("span", { class: "note" }, "Reviewed by " + t.model + (t.model.startsWith("gemini") ? ", listening to the audio" : ", from pitch and timing measurements")) : null));
@@ -344,22 +359,53 @@ function feedbackPanel(t, audio, open) {
   paint.el = el; paint(t);
   return el;
 }
+/* Play just [start, end] of a take, highlighting el while it plays. */
+let stopSpan = null;
+function playSpan(audio, start, end, el) {
+  if (stopSpan) stopSpan();
+  const until = Math.max(end, start + 1.5) + 0.4;
+  audio.currentTime = Math.max(0, start - 0.3); audio.play();
+  el.classList.add("playing");
+  const tick = () => { if (audio.currentTime >= until) audio.pause(); };
+  const done = () => { el.classList.remove("playing"); audio.removeEventListener("timeupdate", tick); audio.removeEventListener("pause", done); stopSpan = null; };
+  audio.addEventListener("timeupdate", tick); audio.addEventListener("pause", done);
+  stopSpan = done;
+}
+/* Coach text with [words](start-end) links turned into buttons that play that moment. */
+function rich(text, audio) {
+  const out = [], re = /\[([^\]]+)\]\(\s*(\d+(?:\.\d+)?)\s*(?:[-\u2013]\s*(\d+(?:\.\d+)?))?\s*s?\s*\)/g;
+  let last = 0, m;
+  while ((m = re.exec(text || ""))) {
+    out.push(text.slice(last, m.index));
+    const s = +m[2], e = m[3] ? +m[3] : s + 1.5;
+    const b = h("button", { class: "cite", type: "button", title: "Play " + mmss(s), "aria-label": "Play “" + m[1] + "” at " + mmss(s) },
+      m[1], h("span", {}, "▶ " + mmss(s)));
+    b.addEventListener("click", () => playSpan(audio, s, e, b));
+    out.push(b); last = re.lastIndex;
+  }
+  out.push((text || "").slice(last));
+  return out;
+}
+/* One lesson: what the coach hears, why, and the exercise that fixes it. */
+function lesson(l, audio) {
+  return h("div", { class: "lesson" },
+    h("div", { class: "k" }, l.area), h("b", { class: "lt" }, l.title),
+    h("p", {}, rich(l.hear, audio)),
+    l.why ? h("p", {}, h("span", { class: "lbl" }, "Why: "), rich(l.why, audio)) : null,
+    h("div", { class: "ex" },
+      h("div", {}, h("span", { class: "lbl" }, "Exercise: "), h("b", {}, l.exercise), l.dose ? h("span", { class: "note" }, " · " + l.dose) : null),
+      l.steps?.length ? h("ol", {}, l.steps.map(x => h("li", {}, rich(x, audio)))) : null,
+      l.feel ? h("p", { class: "note" }, h("span", { class: "lbl" }, "When it’s working: "), rich(l.feel, audio)) : null));
+}
 /* One timestamped note. Its button plays just that span of your recording. */
 function moment(m, audio) {
   const row = h("div", { class: "mo" });
   const ts = h("button", { class: "ts", type: "button", "aria-label": "Play from " + mmss(m.start) }, "▶ " + mmss(m.start));
-  ts.addEventListener("click", () => {
-    const end = Math.max(m.end, m.start + 1.5) + 0.4;
-    audio.currentTime = Math.max(0, m.start - 0.3); audio.play();
-    document.querySelectorAll(".mo.playing").forEach(e => e.classList.remove("playing")); row.classList.add("playing");
-    const stop = () => { if (audio.currentTime >= end) { audio.pause(); row.classList.remove("playing"); audio.removeEventListener("timeupdate", stop); } };
-    audio.addEventListener("timeupdate", stop);
-    audio.addEventListener("pause", () => { row.classList.remove("playing"); audio.removeEventListener("timeupdate", stop); }, { once: true });
-  });
+  ts.addEventListener("click", () => playSpan(audio, m.start, m.end, row));
   row.append(ts, h("div", {},
     h("div", { class: "k" + (m.kind === "good" ? " good" : "") }, m.kind === "good" ? "Nice" : m.kind),
     m.quote ? h("div", {}, h("q", {}, m.quote)) : null,
-    h("div", {}, m.note), m.kind !== "good" && m.try ? h("div", { class: "try" }, m.try) : null));
+    h("div", {}, rich(m.note, audio)), m.kind !== "good" && m.try ? h("div", { class: "try" }, rich(m.try, audio)) : null));
   return row;
 }
 
@@ -478,9 +524,9 @@ function paintStreak() {
 /* ---------- steps ---------- */
 const STEPS = [
   { id: "warm", name: "Warm up", mins: 1, render: renderWarm },
-  { id: "read", name: "Read", mins: 5, render: renderRead },
-  { id: "shadow", name: "Shadow", mins: 3, render: renderShadow },
-  { id: "enun", name: "Enunciate", mins: 2, render: renderEnun },
+  { id: "read", name: "Read", mins: 2, render: renderRead },
+  { id: "shadow", name: "Shadow", mins: 2, render: renderShadow },
+  { id: "enun", name: "Enunciate", mins: 1, render: renderEnun },
   { id: "week", name: "Weekly", mins: 0, render: renderWeek },
   { id: "coach", name: "Progress", mins: 0, render: renderProgress },
 ];
@@ -535,8 +581,8 @@ function renderWarm(v) {
 
 function renderRead(v) {
   let pi = Math.min(store.get("page", 0), PAGES.length - 1);
-  const { wrap, timer } = stepHead("Read aloud", 300,
-    "Tap the words that matter to mark them. Then record yourself reading, with bigger pitch movement on the marked words.");
+  const { wrap, timer } = stepHead("Read aloud", 120,
+    "Tap the few words that matter to mark them, then record one read of the page with bigger pitch movement on the marked words.");
   const card = h("div", { class: "card" });
   const pos = h("span", { class: "note grow" });
   const prev = h("button", { class: "btn ghost", type: "button", "aria-label": "Previous page" }, "←");
@@ -591,7 +637,7 @@ function renderShadow(v) {
   const againB = h("button", { class: "btn", type: "button" }, "Again");
   const nextB = h("button", { class: "btn", type: "button", "aria-label": "Next sentence" }, "→");
   const src = h("div", { class: "src" });
-  const { wrap, timer } = stepHead("Shadow", 180,
+  const { wrap, timer } = stepHead("Shadow", 120,
     "Listen to one sentence, then say it back right away, copying the narrator’s pitch, pauses, and stress. Tap any sentence to jump there.");
 
   const load = () => {
@@ -659,8 +705,8 @@ function renderShadow(v) {
 function renderEnun(v) {
   const n = Math.floor(Date.now() / 864e5) % ENUNCIATE.length;
   let k = store.get("enunPick:" + today(), n);
-  const { wrap, timer } = stepHead("Enunciate", 120,
-    "Read this very slowly. Exaggerate every mouth movement: full lip rounding, crisp consonants, open vowels. Then read it once at normal speed.");
+  const { wrap, timer } = stepHead("Enunciate", 60,
+    "Read it once slowly, exaggerating every mouth movement: full lip rounding, crisp consonants, open vowels. Then once at normal speed.");
   const card = h("div", { class: "card" });
   const paint = () => { const e = ENUNCIATE[k]; card.innerHTML = ""; card.append(h("div", { class: "text" }, e.p.map(p => h("p", {}, p))), h("div", { class: "src" }, e.t + ", " + e.a)); };
   const other = h("button", { class: "btn ghost", type: "button", onclick: () => { k = (k + 1) % ENUNCIATE.length; store.set("enunPick:" + today(), k); paint(); } }, "Different paragraph");

@@ -128,32 +128,71 @@ def mmss(t): t = max(0, t); return "%02d:%04.1f" % (int(t // 60), t % 60)
 
 def _obj(props, req=None): return {"type": "object", "properties": props, "required": req or list(props), "additionalProperties": False}
 FEEDBACK_SCHEMA = _obj({
-    "summary": {"type": "string", "description": "2-4 sentences: overall impression of this read, in plain second person."},
+    "summary": {"type": "string", "description": "2-4 sentences: overall impression of this read, in plain second person. Link examples as [words](start-end)."},
     "scores": _obj({k: {"type": "integer", "description": "1 (weak) to 5 (excellent)"} for k in
                     ("pitch_variation", "stress", "pace_and_pauses", "articulation", "endings", "fluency")}),
     "wpm": {"type": "integer", "description": "Speaking rate in words per minute, excluding long silences."},
-    "strengths": {"type": "array", "items": {"type": "string"}},
-    "priorities": {"type": "array", "items": {"type": "string"}, "description": "The 2-3 changes that would most improve the next read, most important first."},
+    "strengths": {"type": "array", "items": {"type": "string"}, "description": "Each with at least one linked example: [words](start-end)."},
+    "priorities": {"type": "array", "items": {"type": "string"}, "description": "One line each: the 2-3 lesson titles' headline changes, most important first."},
     "moments": {"type": "array", "description": "Specific moments worth hearing again, in time order. Aim for 5-12. Include good moments too.",
                 "items": _obj({
                     "start": {"type": "number", "description": "Seconds from the start of the recording."},
                     "end": {"type": "number"},
                     "quote": {"type": "string", "description": "The words spoken in this span."},
                     "kind": {"type": "string", "enum": ["pitch", "stress", "pace", "pause", "articulation", "ending", "fluency", "breath", "good"]},
-                    "note": {"type": "string", "description": "What happened, concretely."},
-                    "try": {"type": "string", "description": "Exactly how to say it next time (empty for good moments)."}})},
+                    "note": {"type": "string", "description": "What you hear and what's causing it physically."},
+                    "try": {"type": "string", "description": "How to fix it physically next time - a body or breath cue, not just 'say it slower' (empty for good moments)."}})},
     "progress": {"type": "string", "description": "How this compares with the earlier sessions listed, or empty if none."},
-    "drill": {"type": "string", "description": "One specific 1-2 minute exercise for tomorrow, aimed at the top priority."},
+    "lessons": {"type": "array", "description": "The 2-3 most important things to work on, as a voice teacher would teach them, most important first.",
+                "items": _obj({
+                    "title": {"type": "string", "description": "Short, plain-language name, e.g. 'Bring the sound forward out of your throat'."},
+                    "area": {"type": "string", "enum": ["breath", "alignment", "tension", "resonance", "onset", "articulation", "pitch", "thought"]},
+                    "hear": {"type": "string", "description": "What you hear, with linked examples [words](start-end)."},
+                    "why": {"type": "string", "description": "The physical or mental cause underneath it, in plain language."},
+                    "exercise": {"type": "string", "description": "Name of the exercise."},
+                    "steps": {"type": "array", "items": {"type": "string"}, "description": "How to do it, step by step, with body cues."},
+                    "dose": {"type": "string", "description": "How long and how often, e.g. '2 minutes before each read, daily this week'."},
+                    "feel": {"type": "string", "description": "What it feels or sounds like when it's working."}})},
+    "drill": {"type": "string", "description": "Tomorrow's 2-minute warm-up plan, built from the lessons' exercises."},
 })
 
-COACH = """You are an expert voice and speech coach (think: a top dialect coach and public-speaking trainer). \
-You are listening to a recording of your student reading a passage aloud as part of a 10-minute daily practice routine \
-(warm-up, read aloud with marked stress words, shadow a professional narrator, enunciation drills). \
-Their goals: more pitch movement and expressiveness, landing the important words, controlled pace with purposeful pauses, \
-crisp consonants and fully finished word endings, and a confident, resonant voice.
+COACH = """You are a seasoned voice teacher - trained in the Linklater, Fitzmaurice and Lessac traditions, with years of \
+coaching actors, audiobook narrators and executives one-on-one. Your student records a passage aloud as part of a 6-minute \
+daily routine (warm-up, read aloud with marked stress words, shadow a professional narrator, enunciation drills). \
+Their goals: a confident, resonant, expressive voice; landing the important words; purposeful pacing; clean, finished words.
 
-Be specific and honest, like a good coach: name what actually happened, quote the words, and say exactly what to do differently. \
-Skip generic advice. Praise only what is genuinely good. For each moment, give start and end in seconds from the start of the recording."""
+Coach like you would in the room, not like a speech-analytics tool. Anyone can count words per minute; your value is hearing \
+WHY the voice does what it does and knowing the exercise that fixes it. For every problem, diagnose the physical cause \
+underneath it:
+- breath: shallow or high-chest breathing, running out of air before the phrase ends, no support under the final words, \
+held breath, audible gasps
+- alignment: collapsed chest or forward head (often heard as a pressed, small or thin sound), locked knees, slumped reading posture
+- tension: tight jaw (muffled vowels, little mouth space), tongue-root or neck tension, a pushed or squeezed tone, a high larynx
+- resonance and placement: sound swallowed at the back of the throat, stuck in the nose, or forward "in the mask"; \
+thin vs. rich; dull vs. bright
+- onset and phonation: hard glottal attacks, breathiness, vocal fry at phrase ends, pitch dropping out of support
+- articulators: lazy lips, tongue tip not reaching the ridge, jaw doing the tongue's job, final consonants unreleased
+- thought and intention: reading words instead of thinking the thoughts, no picture behind the image, \
+pausing for breath instead of for meaning, rushing the connective tissue between big moments
+Then prescribe the work: name a specific exercise (e.g. lip trills on a slide, straw phonation, "hng-ah" drops, humming into \
+"mm-hmm" for forward placement, rib-swing breathing, the cork or "bone prop" drill, consonant "plosive pops", \
+whispered intention reads, standing wall alignment, semi-supine breathing, yawn-sigh, tongue-out reading, \
+reading one thought per breath, "word-painting" an image before you say it) and say exactly how to do it, \
+how long and how often, and what they should feel when it's working. Give physical cues a real coach would give: \
+where to feel the vibration, what to release, how to stand, where the breath should go, what to imagine.
+
+The measurements you are given are your private evidence, like a teacher glancing at a spectrogram. \
+Don't lead with them or turn feedback into numbers; mention one only when it truly helps the student hear the problem.
+
+Be specific and honest. Praise only what is genuinely good. For each moment, give start and end in seconds from the start of \
+the recording.
+
+The student can click to hear anything you point to, so link every example. Whenever any text you write (summary, strengths, \
+priorities, progress, notes, tips) quotes or refers to something specific in THIS recording, write it as [words as spoken](start-end) \
+with times in seconds, e.g. "you dropped endings ([made a my mind](41.2-42.0), [love th'old man](63.5-64.3))" or \
+"the pause before [Hearken!](38.9-39.6) was excellent". Put the words as you actually heard them inside the brackets. \
+Every quoted phrase or word from this recording gets a link; never refer to a moment without one. \
+Don't link things from earlier sessions, since those are different recordings."""
 
 LISTEN = """Listen to the audio itself - pitch contour, stress, rhythm, pauses, breath, resonance, articulation, character - not just the words. \
 Below the audio you also get a machine transcript with Praat measurements for every word, to help you place times precisely \
@@ -271,8 +310,20 @@ def call_gemini(model, prompt, audio_b64):
     if not text: raise RuntimeError("Gemini returned no text (%s)" % cand.get("finishReason"))
     return json.loads(text)
 
+CITE = re.compile(r"\[([^\]]+)\]\(\s*(\d+(?:\.\d+)?)\s*(?:[-\u2013]\s*(\d+(?:\.\d+)?))?\s*s?\s*\)")
+
 def snap(fb, words, dur):
-    """Keep moment times inside the recording and sorted."""
+    """Keep moment and [words](start-end) link times inside the recording; sort moments."""
+    def fix(text):
+        def one(m):
+            s0 = max(0.0, min(float(m[2]), dur)); e0 = max(s0, min(float(m[3] or s0 + 1.5), dur))
+            return "[%s](%.1f-%.1f)" % (m[1], s0, e0)
+        return CITE.sub(one, text) if isinstance(text, str) else text
+    for k in ("summary", "progress", "drill"): fb[k] = fix(fb.get(k, ""))
+    for k in ("strengths", "priorities"): fb[k] = [fix(x) for x in fb.get(k, [])]
+    for m in fb.get("moments", []): m["note"], m["try"] = fix(m.get("note", "")), fix(m.get("try", ""))
+    for l in fb.get("lessons", []):
+        for k in ("hear", "why", "feel"): l[k] = fix(l.get(k, ""))
     ms = []
     for m in fb.get("moments", []):
         s = max(0.0, min(float(m.get("start", 0)), dur)); e = max(s, min(float(m.get("end", s)), dur))
@@ -282,7 +333,7 @@ def snap(fb, words, dur):
 
 def analyze(take_id):
     r = q("SELECT * FROM takes WHERE id=?", (take_id,), one=True)
-    if not r: return
+    if not r or r["status"] not in ("queued", "processing", "nokey"): return  # cancelled or already reviewed
     if not coach_ready():
         q("UPDATE takes SET status='nokey' WHERE id=?", (take_id,)); return
     q("UPDATE takes SET status='processing', error=NULL WHERE id=?", (take_id,))
