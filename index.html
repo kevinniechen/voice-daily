@@ -705,7 +705,8 @@ function renderWeek(v) {
 function renderProgress(v) {
   const done = TAKES.filter(t => t.status === "done" && t.feedback).slice().reverse();
   v.append(h("div", { class: "head" }, h("h2", {}, "Progress")),
-    h("p", { class: "how" }, "Every recording you make is kept here with your coach’s notes. Scores are 1 to 5, from your pitch, loudness and timing; tap a timestamp to hear that moment."));
+    h("p", { class: "how" }, "Every recording you make is kept here with your coach’s notes. Scores are 1 to 5; tap a timestamp to hear that moment."),
+    uploadWidget(() => go("coach")));
   if (done.length) {
     const grid = h("div", { class: "sparks" });
     for (const [k, n] of SKILLS) grid.append(spark(n, done.map(t => ({ ts: t.ts, y: t.feedback.scores?.[k] })), 1, 5));
@@ -715,7 +716,7 @@ function renderProgress(v) {
   }
   const list = h("div", { class: "takes" });
   if (!TAKES.length) list.append(h("div", { class: "empty" }, "No recordings yet. Record yourself in the Read step and your coach’s notes will show up here."));
-  TAKES.forEach((t, i) => list.append(takeRow(t, () => go("coach"), t.kind === "weekly" ? "Weekly" : null, i === 0)));
+  TAKES.forEach((t, i) => list.append(takeRow(t, () => go("coach"), t.kind === "weekly" ? "Weekly" : t.kind === "upload" ? "Uploaded" : null, i === 0)));
   v.append(list);
 }
 /* One skill over time: a single-series sparkline (latest value large, a dot per session, hover for date). */
@@ -738,29 +739,88 @@ function spark(name, pts, lo, hi) {
   return h("div", { class: "spark" }, h("div", { class: "t" }, h("span", {}, name), h("b", {}, last)), svg);
 }
 
-/* The app moved off GitHub Pages so recordings can live in your account. Old takes recorded
-   there stay in that browser, so offer them as downloads before sending people on. */
-const HOME = "https://voice-daily.exe.xyz/";
+/* The app moved off GitHub Pages so recordings can live in your account. Takes recorded there
+   are in that browser only. "Move them to my account" goes to the new site, which signs you in
+   and sends you back here with a one-time token; this page then uploads them. */
+const HOME = "https://voice-daily.exe.xyz/", OLD = "https://kevinniechen.github.io/voice-daily/";
+function oldTakeMeta(t) {
+  const n = /^Page (\d+)$/.exec(t.label || ""), pi = t.kind === "weekly" ? 0 : n ? +n[1] - 1 : -1;
+  return PAGES[pi] ? pageMeta(pi, t.label) : { label: t.label || "" };
+}
 async function movedNotice() {
-  const old = await idb.all();
-  if (!old.length) { location.replace(HOME); return; }
+  const old = (await idb.all()).filter(t => t.blob).sort((a, b) => a.ts - b.ts);
+  const token = (/#import=(\w+)/.exec(location.hash) || [])[1];
+  if (!old.length || (store.get("moved", false) && !token)) { location.replace(HOME); return; }
+  try { BOOKS = await (await fetch("books.json")).json(); buildPages(); } catch {}
   const v = $("#view"); v.innerHTML = ""; $("#steps").innerHTML = "";
-  v.append(h("div", { class: "head" }, h("h2", {}, "Ten Minute Voice has moved")),
-    h("p", { class: "how" }, "It now keeps your recordings in your account and gives you coach feedback on each one. You have " + old.length + " older recordings saved in this browser; download any you want to keep, then continue."),
-    h("div", { class: "takes" }, old.sort((a, b) => b.ts - a.ts).map(t => h("div", { class: "take" },
+  const status = h("p", { class: "how" });
+  v.append(h("div", { class: "head" }, h("h2", {}, "Ten Minute Voice has moved")), status);
+  if (token) {
+    history.replaceState(null, "", location.pathname);
+    let ok = 0, failed = [];
+    for (const [i, t] of old.entries()) {
+      status.textContent = "Moving your recordings to your account… " + (i + 1) + " of " + old.length;
+      try {
+        const r = await fetch(HOME + "api/import/take", { method: "POST", body: t.blob, headers: { "Content-Type": t.blob.type || "audio/webm", "X-Import-Token": token,
+          "X-Take-Meta": encodeURIComponent(JSON.stringify({ kind: t.kind, ts: t.ts, secs: t.secs, ...oldTakeMeta(t) })) } });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+        ok++;
+      } catch (e) { failed.push(e.message); }
+    }
+    try { const st = store.all(); delete st.moved; await fetch(HOME + "api/import/state", { method: "POST", body: JSON.stringify(st), headers: { "Content-Type": "application/json", "X-Import-Token": token } }); } catch {}
+    if (!failed.length) { store.set("moved", true); location.replace(HOME + "#imported=" + ok); return; }
+    status.textContent = "Moved " + ok + " of " + old.length + ". The rest didn’t go through (" + failed[0] + "). You can try again or download them below.";
+  } else {
+    status.textContent = "It now keeps your recordings in your account and gives you coach feedback on each one. You have " + old.length + " recordings saved in this browser. Move them to your account and each one gets reviewed.";
+  }
+  v.append(h("div", { class: "bar" }, h("a", { class: "btn primary", href: HOME + "?import-old=1" }, "Move them to my account"), h("a", { class: "btn ghost", href: HOME }, "Skip")),
+    h("div", { class: "takes" }, old.slice().reverse().map(t => h("div", { class: "take" },
       h("span", { class: "d" }, new Date(t.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" })),
       h("span", { class: "tag" }, (t.label || t.kind) + " · " + fmt(t.secs)),
-      h("a", { class: "x", href: URL.createObjectURL(t.blob), download: "voice-" + t.kind + "-" + new Date(t.ts).toISOString().slice(0, 10) + (t.blob.type.includes("mp4") ? ".m4a" : ".webm") }, "Download")))),
-    h("div", { class: "bar" }, h("a", { class: "btn primary", href: HOME }, "Go to the new site")));
+      h("a", { class: "x", href: URL.createObjectURL(t.blob), download: "voice-" + t.kind + "-" + new Date(t.ts).toISOString().slice(0, 10) + (t.blob.type.includes("mp4") ? ".m4a" : ".webm") }, "Download"),
+      h("audio", { controls: true, preload: "none", src: URL.createObjectURL(t.blob) })))));
+}
+/* New-site half of the move: get a token, hand it to the old site. */
+let IMPORTED = false;
+async function importHandoff() {
+  if (new URLSearchParams(location.search).has("import-old")) {
+    const r = await fetch("api/import-token", { method: "POST" }).then(r => r.json()).catch(() => null);
+    if (r?.token) { location.replace(OLD + "#import=" + r.token); return true; }
+  }
+  const n = (/#imported=(\d+)/.exec(location.hash) || [])[1];
+  if (n != null) { history.replaceState(null, "", "/"); IMPORTED = true; setTimeout(() => toast("Moved " + n + " recording" + (n === "1" ? "" : "s") + " from the old site. Your coach is reviewing them now."), 300); }
+  return false;
+}
+function toast(msg) {
+  const el = h("div", { class: "card", role: "status", style: "margin:0 0 16px;border-color:var(--ok)" }, msg);
+  $("#view").before(el); setTimeout(() => el.remove(), 15000);
+}
+
+/* Any audio file (another app, a voice memo) can go through the coach too. */
+function uploadWidget(onDone) {
+  const input = h("input", { type: "file", accept: "audio/*,video/*,.m4a,.webm,.mp3,.wav", multiple: true, style: "display:none" });
+  const msg = h("span", { class: "note" });
+  const btn = h("button", { class: "btn", type: "button", onclick: () => input.click() }, "Upload a recording");
+  input.addEventListener("change", async () => {
+    const files = [...input.files]; input.value = ""; let ok = 0;
+    for (const [i, f] of files.entries()) {
+      msg.textContent = "Uploading " + (i + 1) + " of " + files.length + "…";
+      try { await api.upload({ kind: "upload", label: f.name.replace(/\.[^.]+$/, ""), ts: f.lastModified || Date.now(), secs: 0, blob: f }); ok++; }
+      catch (e) { msg.textContent = f.name + ": " + e.message; }
+    }
+    if (ok) { msg.textContent = "Uploaded " + ok + ". Feedback appears below in a minute or two."; await loadTakes(); onDone && onDone(); }
+  });
+  return h("div", { class: "bar", style: "margin:0 0 16px" }, btn, input, msg);
 }
 
 /* ---------- boot ---------- */
 (async () => {
   if (location.hostname.endsWith("github.io")) return movedNotice();
+  if (await importHandoff()) return;
   try { const r = await fetch("api/me"); if (r.status === 401) { location.href = "/__exe.dev/login?redirect=/"; return; } ME = await r.json(); } catch {}
   try { navigator.storage?.persist && navigator.storage.persist(); } catch {}
   if (ME) { $("#streak").before(h("div", { class: "who" }, ME.email)); await sync.pull(); }
-  current = store.get("step", "warm");
+  current = IMPORTED ? "coach" : store.get("step", "warm");
   try { BOOKS = await (await fetch("books.json")).json(); } catch { BOOKS = []; }
   buildPages();
   if (ME) { await loadTakes(); flushLocal().then(async n => { if (n) { await loadTakes(); go(current); } }); }

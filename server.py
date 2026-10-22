@@ -37,6 +37,8 @@ LISTENERS = [] if os.environ.get("COACH") == "claude" else (
 MODEL = LISTENERS[0][1] if LISTENERS else CLAUDE_MODEL
 def coach_ready(): return True
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "30"))
+IMPORT_ORIGINS = {"https://kevinniechen.github.io"}
+IMPORT_TOKENS = {}  # token -> (user_id, expires)
 STATIC = {"/": "index.html", "/index.html": "index.html", "/books.json": "books.json"}
 os.makedirs(os.path.join(DATA, "audio"), exist_ok=True)
 
@@ -410,35 +412,48 @@ class H(BaseHTTPRequestHandler):
           (me["id"], json.dumps(st), int(time.time())))
         self.send(200, {"ok": True})
 
+    # ---- moving takes from the old GitHub Pages site ----
+    # That site can't carry the exe.dev login, so the new site hands it a short-lived token
+    # (POST /api/import-token), and it uploads to /api/import/* with the token instead.
+    def cors(self):
+        o = self.headers.get("Origin", "")
+        return {"Access-Control-Allow-Origin": o, "Vary": "Origin"} if o in IMPORT_ORIGINS else {}
+
+    def do_OPTIONS(self):
+        self.send(204, b"", "text/plain", {**self.cors(), "Access-Control-Allow-Methods": "POST",
+                  "Access-Control-Allow-Headers": "Content-Type, X-Take-Meta, X-Import-Token", "Access-Control-Max-Age": "600"})
+
+    def import_user(self):
+        t = IMPORT_TOKENS.get(self.headers.get("X-Import-Token", ""))
+        return {"id": t[0]} if t and t[1] > time.time() else None
+
     def do_POST(self):
+        p = urlparse(self.path).path
+        if p.startswith("/api/import/"):
+            me = self.import_user()
+            if not me: return self.send(401, {"error": "import link expired; start again from the new site"}, headers=self.cors())
+            if p == "/api/import/take": return self.save_take(me, extra=self.cors())
+            if p == "/api/import/state":
+                try: old = json.loads(self.body(2 << 20))
+                except Exception: return self.send(400, {"error": "bad json"}, headers=self.cors())
+                r = q("SELECT json FROM state WHERE user_id=?", (me["id"],), one=True)
+                cur = json.loads(r["json"]) if r else {}
+                merged = {**old, **cur}  # the account's settings win; practice days are combined
+                days = {k: list(v) for k, v in (cur.get("days") or {}).items()}
+                for k, v in (old.get("days") or {}).items(): days[k] = sorted(set(days.get(k, [])) | set(v))
+                merged["days"] = days
+                q("INSERT INTO state(user_id,json,updated) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET json=excluded.json, updated=excluded.updated",
+                  (me["id"], json.dumps(merged), int(time.time())))
+                return self.send(200, {"ok": True}, headers=self.cors())
+            return self.send(404, {"error": "not found"}, headers=self.cors())
         me = self.user()
         if not me: return self.send(401, {"error": "login required"})
-        p = urlparse(self.path).path
-        if p == "/api/takes":
-            # body: raw audio. meta (kind, label, text, marks) in X-Take-Meta header as JSON.
-            try: meta = json.loads(unquote(self.headers.get("X-Take-Meta") or "{}"))
-            except Exception: meta = {}
-            try: raw = self.body()
-            except ValueError: return self.send(413, {"error": "recording too large"})
-            if len(raw) < 1000: return self.send(400, {"error": "empty recording"})
-            tid = "%s-%d-%s" % (re.sub(r"\W", "", meta.get("kind", "daily"))[:10] or "daily", int(time.time() * 1000), uuid.uuid4().hex[:6])
-            row = {"id": tid, "user_id": me["id"]}
-            os.makedirs(os.path.dirname(audio_path(row)), exist_ok=True)
-            mime = (self.headers.get("Content-Type") or "audio/webm").split(";")[0]
-            ext = {"audio/webm": "webm", "audio/mp4": "m4a", "audio/ogg": "ogg", "audio/wav": "wav", "audio/mpeg": "mp3"}.get(mime, "bin")
-            orig = audio_path(row, "orig." + ext)
-            with open(orig, "wb") as f: f.write(raw)
-            # mono mp3: plays everywhere (incl. iOS), seeks cleanly, small enough to send inline
-            cp = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", orig, "-ac", "1", "-ar", "24000", "-b:a", "64k", audio_path(row)], capture_output=True)
-            if cp.returncode: return self.send(400, {"error": "could not decode audio: " + cp.stderr.decode()[:200]})
-            try: secs = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio_path(row)], capture_output=True, text=True).stdout.strip())
-            except ValueError: secs = float(meta.get("secs") or 0)
-            ts = int(meta.get("ts") or time.time() * 1000)
-            q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
-              (tid, me["id"], meta.get("kind", "daily"), meta.get("label", ""), ts, round(secs, 2), meta.get("text", ""),
-               json.dumps(meta.get("marks", [])), mime, "queued"))
-            self.queue_if_allowed(me, tid)
-            return self.send(200, take_json(q("SELECT * FROM takes WHERE id=?", (tid,), one=True)))
+        if p == "/api/import-token":
+            for k in [k for k, v in IMPORT_TOKENS.items() if v[1] < time.time()]: IMPORT_TOKENS.pop(k, None)
+            tok = uuid.uuid4().hex + uuid.uuid4().hex
+            IMPORT_TOKENS[tok] = (me["id"], time.time() + 1800)
+            return self.send(200, {"token": tok})
+        if p == "/api/takes": return self.save_take(me)
         m = re.fullmatch(r"/api/takes/([\w:.-]+)/analyze", p)
         if m:
             r = q("SELECT * FROM takes WHERE id=? AND user_id=?", (m[1], me["id"]), one=True)
@@ -448,6 +463,38 @@ class H(BaseHTTPRequestHandler):
             self.queue_if_allowed(me, r["id"])
             return self.send(200, take_json(q("SELECT * FROM takes WHERE id=?", (r["id"],), one=True)))
         self.send(404, {"error": "not found"})
+
+    def save_take(self, me, extra=None):
+        """Body: raw audio. Meta (kind, label, ts, text, marks) in the X-Take-Meta header as URI-encoded JSON."""
+        extra = extra or {}
+        try: meta = json.loads(unquote(self.headers.get("X-Take-Meta") or "{}"))
+        except Exception: meta = {}
+        try: raw = self.body()
+        except ValueError: return self.send(413, {"error": "recording too large"}, headers=extra)
+        if len(raw) < 1000: return self.send(400, {"error": "empty recording"}, headers=extra)
+        if meta.get("ts"):  # same take sent twice (re-import, retry): keep the first
+            dup = q("SELECT * FROM takes WHERE user_id=? AND ts=?", (me["id"], int(meta["ts"])), one=True)
+            if dup: return self.send(200, {**take_json(dup), "duplicate": True}, headers=extra)
+        tid = "%s-%d-%s" % (re.sub(r"\W", "", meta.get("kind", "daily"))[:10] or "daily", int(time.time() * 1000), uuid.uuid4().hex[:6])
+        row = {"id": tid, "user_id": me["id"]}
+        os.makedirs(os.path.dirname(audio_path(row)), exist_ok=True)
+        mime = (self.headers.get("Content-Type") or "audio/webm").split(";")[0]
+        ext = {"audio/webm": "webm", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/aac": "aac", "audio/ogg": "ogg",
+               "audio/wav": "wav", "audio/x-wav": "wav", "audio/mpeg": "mp3", "audio/flac": "flac", "video/mp4": "mp4", "video/webm": "webm"}.get(mime, "bin")
+        orig = audio_path(row, "orig." + ext)
+        with open(orig, "wb") as f: f.write(raw)
+        # mono mp3: plays everywhere (incl. iOS), seeks cleanly, small enough to send inline
+        cp = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", orig, "-ac", "1", "-ar", "24000", "-b:a", "64k", audio_path(row)], capture_output=True)
+        if cp.returncode:
+            os.remove(orig); return self.send(400, {"error": "could not decode audio: " + cp.stderr.decode()[:200]}, headers=extra)
+        try: secs = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio_path(row)], capture_output=True, text=True).stdout.strip())
+        except ValueError: secs = float(meta.get("secs") or 0)
+        ts = int(meta.get("ts") or time.time() * 1000)
+        q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
+          (tid, me["id"], meta.get("kind", "daily"), meta.get("label", ""), ts, round(secs, 2), meta.get("text", ""),
+           json.dumps(meta.get("marks", [])), mime, "queued"))
+        self.queue_if_allowed(me, tid)
+        return self.send(200, take_json(q("SELECT * FROM takes WHERE id=?", (tid,), one=True)), headers=extra)
 
     def queue_if_allowed(self, me, tid):
         n = q("SELECT COUNT(*) c FROM takes WHERE user_id=? AND analyzed>?", (me["id"], int(time.time()) - 86400), one=True)["c"]
