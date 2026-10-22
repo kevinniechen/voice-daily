@@ -1,6 +1,12 @@
 # Ten Minute Voice
 
-A 6-minute daily voice routine: warm up, read aloud with marked stress words, shadow a narrator sentence by sentence, enunciate, and record the same page weekly to compare.
+A short daily voice lesson with a coach that listens. Three tabs:
+
+- **Today**: one lesson a day, fixed when you start it and done in order: warm-up (body, breath, sound), a quick review of an old focus when one is due, the drill for your current focus, read a page aloud, shadow a narrator. Every seventh lesson is a check-in on the same page.
+- **Practice**: free play. Any exercise you've been given, any page, any book to shadow, enunciation passages, or an uploaded file. Graded, but doesn't move the curriculum.
+- **Journey**: your path of focuses (current, in review, up next, learned), every past lesson read-only with its recordings and notes, streak and score charts.
+
+The curriculum: each review's lessons become focuses (a habit the queue already has gets flagged again and moves up). One focus is current at a time; pass its drill in lessons on 3 different days and it moves to review, returning after 3, 7 and 21 days; pass those and it's learned.
 
 Audio: public-domain LibriVox recordings. Text: Project Gutenberg. Sentence timings were made by transcribing each recording with Whisper (word timestamps) and aligning it to the Gutenberg text.
 

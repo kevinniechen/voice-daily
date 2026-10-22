@@ -159,6 +159,37 @@ footer a{color:inherit}
 .focus{display:grid;gap:2px;border-left:3px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;padding:10px 12px;margin:0 0 14px;font-size:15px}
 .focus .lbl{font:600 11px/1.3 var(--ui);text-transform:uppercase;letter-spacing:.05em;color:var(--accent)}
 .focus small{color:var(--muted);font-size:12px}
+/* Lesson flow */
+.lhead{display:flex;justify-content:space-between;font:600 13px/1.3 var(--ui);color:var(--muted);margin:0 0 8px}
+.lbar{display:flex;gap:4px;margin:0 0 18px}
+.lbar i{flex:1;height:6px;border-radius:3px;background:var(--line)}
+.lbar i.done{background:var(--ok)} .lbar i.now{background:var(--accent)}
+.lnav{position:sticky;bottom:calc(68px + env(safe-area-inset-bottom,0px));display:flex;gap:12px;align-items:center;margin-top:20px;padding:10px 0;background:var(--bg)}
+.lnav .linkbtn[hidden]{display:none}
+.exb{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:10px 14px;margin:0 0 12px;font-size:15px}
+.exb summary{cursor:pointer;font-weight:600}
+.exb ol{margin:8px 0;padding-left:20px} .exb li{margin:4px 0} .exb p{margin:6px 0 0}
+.pass{display:flex;align-items:center;gap:6px;margin:0 0 10px;font-size:13px;color:var(--muted)}
+.pass i{width:22px;height:8px;border-radius:4px;background:var(--line)} .pass i.on{background:var(--ok)}
+.pass span{margin-left:4px}
+/* Practice menu */
+.menu{display:grid;gap:8px}
+.menu button{all:unset;cursor:pointer;display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+.menu b{font-size:16px} .menu span{grid-column:1;color:var(--muted);font-size:14px} .menu i{grid-row:1/3;grid-column:2;align-self:center;font-style:normal;font-size:22px;color:var(--muted)}
+.menu button:focus-visible{outline:2px solid var(--accent)}
+details.drill > summary{list-style:none;cursor:pointer} details.drill > summary::-webkit-details-marker{display:none}
+/* Journey path */
+.path{list-style:none;margin:0 0 8px;padding:0 0 0 18px;border-left:2px solid var(--line);display:grid;gap:8px}
+.path li{position:relative;border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:10px 12px}
+.path li::before{content:"";position:absolute;left:-26px;top:16px;width:12px;height:12px;border-radius:50%;background:var(--line);border:2px solid var(--bg)}
+.path li.cur{border-color:var(--accent)} .path li.cur::before{background:var(--accent)}
+.path li.rev::before,.path li.learned::before{background:var(--ok)}
+.path li.more{border:0;background:none;padding:2px 0}
+.path summary{cursor:pointer;display:grid;gap:2px;list-style:none} .path summary::-webkit-details-marker{display:none}
+.path summary span{font-size:13px;color:var(--muted)}
+.lesson-row{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:10px 12px;margin:0 0 8px}
+.lesson-row > summary{cursor:pointer;display:grid;gap:2px;list-style:none} .lesson-row > summary::-webkit-details-marker{display:none}
+.lesson-row > summary span{font-size:13px;color:var(--muted)}
 .drill{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:12px 14px;margin:0 0 10px}
 .lesson .drill{margin:10px 0 0;background:var(--surface)}
 .drill .dh{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
@@ -226,7 +257,6 @@ details.fbd[open] summary::before{content:"\25BE  "}
     <h1>Ten Minute Voice</h1>
     <div class="hud" id="hud"></div>
   </header>
-  <nav class="steps" id="steps"></nav>
   <main id="view"></main>
   <footer id="foot">
     Your recordings and progress are saved to your account, so they follow you across devices. Audio from <a href="https://librivox.org" target="_blank" rel="noopener">LibriVox</a> and text from <a href="https://www.gutenberg.org" target="_blank" rel="noopener">Project Gutenberg</a>, both public domain, synced sentence by sentence.
@@ -325,10 +355,11 @@ const api = {
   analyze: async id => (await fetch("api/takes/" + encodeURIComponent(id) + "/analyze", { method: "POST" })).json(),
   del: id => fetch("api/takes/" + encodeURIComponent(id), { method: "DELETE" }),
   drills: async () => { try { const r = await fetch("api/drills"); return r.ok ? await r.json() : []; } catch { return []; } },
-  makeDrill: async (take_id, lesson) => (await fetch("api/drills", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ take_id, lesson }) })).json(),
-  delDrill: id => fetch("api/drills/" + encodeURIComponent(id), { method: "DELETE" }),
+  lessons: async () => { try { const r = await fetch("api/lessons"); return r.ok ? await r.json() : []; } catch { return []; } },
+  lesson: async (date, page) => { const r = await fetch("api/lesson", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, page }) }); if (!r.ok) throw new Error(r.status); return r.json(); },
+  done: async id => (await fetch("api/lesson/" + encodeURIComponent(id) + "/done", { method: "POST" })).json(),
   async upload(t) {
-    const meta = { kind: t.kind, label: t.label, ts: t.ts, secs: t.secs, text: t.text || "", marks: t.marks || [], drill_id: t.drill_id };
+    const meta = { kind: t.kind, label: t.label, ts: t.ts, secs: t.secs, text: t.text || "", marks: t.marks || [], drill_id: t.drill_id, lesson_id: t.lesson_id, step: t.step, shadow: t.shadow };
     const r = await fetch("api/takes", { method: "POST", body: t.blob,
       headers: { "Content-Type": t.blob.type || "audio/webm", "X-Take-Meta": encodeURIComponent(JSON.stringify(meta)) } });
     const out = await r.json();
@@ -345,12 +376,11 @@ async function flushLocal() {
   }
   return n;
 }
-let TAKES = [], PLAN = null;
-/* PLAN: what the coach set for this session, from your most recent review. */
+let TAKES = [], LESSONS = [];
 let DRILLS = [];
 async function loadTakes() {
-  [TAKES, DRILLS] = await Promise.all([api.takes(), api.drills()]);
-  PLAN = TAKES.find(t => t.plan)?.plan || null;
+  [TAKES, DRILLS, LESSONS] = await Promise.all([api.takes(), api.drills(), api.lessons()]);
+  if (LESSON) LESSON = LESSONS.find(l => l.id === LESSON.id) || LESSON;
   return TAKES;
 }
 const QUICK = { drill: 1, shadow: 1, enun: 1 };  // graded in ~30s, not a full review
@@ -362,13 +392,6 @@ function sessionOf(t) {
   const same = TAKES.filter(x => x.kind === "daily" && dayKey(x.ts) === dayKey(t.ts));
   return same.length > 1 ? "Session " + (same.filter(x => x.ts <= t.ts).length) : "";
 }
-function focusNote(text) {
-  if (!text) return "";
-  const d = new Date(PLAN.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return h("div", { class: "focus" }, h("span", { class: "lbl" }, "Today’s focus"), h("span", {}, text), h("small", {}, "From your coach, after your " + d + " read"));
-}
-
-/* A record/playback widget. kind: "daily" | "weekly". meta() returns { label, text, marks }. */
 function recWidget(kind, meta, onSaved, onStart) {
   const box = h("div", { class: "bar" });
   const btn = h("button", { class: "btn rec", type: "button" }, "Record");
@@ -391,6 +414,7 @@ function recWidget(kind, meta, onSaved, onStart) {
       try { saved = await api.upload(take); msg.textContent = QUICK[kind] ? "" : "Saved. Your coach is listening; feedback appears below in a minute or two."; }
       catch (e) { await idb.put(take); msg.textContent = "Couldn't reach the server, so this take is saved on this device and will upload next time. (" + e.message + ")"; }
       btn.disabled = false;
+      markStep("rec");
       await loadTakes();
       onSaved && onSaved(saved);
     }
@@ -443,7 +467,7 @@ function feedbackPanel(t, audio, open, onDone) {
       h("div", { class: "pills" }, SKILLS.map(([k, n]) => h("span", { class: "pill" }, n + " ", h("b", {}, f.scores?.[k] ?? "–"), "/5")),
       ),
       f.progress ? [h("h4", {}, "Since last time"), h("p", {}, rich(f.progress, audio))] : null,
-      f.lessons?.length ? [h("h4", {}, "Lessons"), ...f.lessons.map((l, i) => lesson(l, audio, t, i))]
+      f.lessons?.length ? [h("h4", {}, "Lessons"), ...f.lessons.map(l => lesson(l, audio))]
         : f.priorities?.length ? [h("h4", {}, "Work on next"), h("ul", {}, f.priorities.map(p => h("li", {}, rich(p, audio))))] : null,
       f.strengths?.length ? [h("h4", {}, "Working well"), h("ul", {}, f.strengths.map(p => h("li", {}, rich(p, audio))))] : null,
       f.moments?.length ? [h("h4", {}, "Moment by moment"), ...f.moments.map(m => moment(m, audio))] : null,
@@ -483,12 +507,8 @@ function rich(text, audio) {
   out.push((text || "").slice(last));
   return out;
 }
-/* One lesson: what the coach hears, why, and the exercise that fixes it. "Practice this now" turns it into a drill. */
-function lesson(l, audio, t, i) {
-  const slot = h("div", {});
-  const existing = DRILLS.find(d => d.id === t.id + "-L" + i);
-  const open = async () => { const d = existing || await api.makeDrill(t.id, i); if (!existing) await loadTakes(); slot.replaceChildren(drillCard(d, { inLesson: true })); };
-  slot.append(h("button", { class: "btn", type: "button", style: "margin-top:10px", onclick: open }, existing ? "Practice this drill" : "Practice this now"));
+/* One lesson from a review: what the coach hears, why, and the exercise that fixes it (it also joins your curriculum). */
+function lesson(l, audio) {
   return h("div", { class: "lesson" },
     h("div", { class: "k" }, l.area), h("b", { class: "lt" }, l.title),
     h("p", {}, rich(l.hear, audio)),
@@ -496,69 +516,20 @@ function lesson(l, audio, t, i) {
     h("div", { class: "ex" },
       h("div", {}, h("span", { class: "lbl" }, "Exercise: "), h("b", {}, l.exercise), l.dose ? h("span", { class: "note" }, " · " + l.dose) : null),
       l.steps?.length ? h("ol", {}, l.steps.map(x => h("li", {}, rich(x, audio)))) : null,
-      l.feel ? h("p", { class: "note" }, h("span", { class: "lbl" }, "When it’s working: "), rich(l.feel, audio)) : null),
-    slot);
+      l.feel ? h("p", { class: "note" }, h("span", { class: "lbl" }, "When it’s working: "), rich(l.feel, audio)) : null));
 }
 
-/* ---------- drills ----------
-   A drill is one lesson's exercise, practised on its own. Record an attempt and the coach grades it.
-   Attempts made when it's due move the schedule (1, 2, 4, 8 days); five passes in a row and it's learned. */
 const GRADES = { got_it: ["✓", "Got it"], almost: ["◐", "Almost"], not_yet: ["✗", "Not yet"] };
-const dueNow = d => d.status === "active" && d.due * 1000 <= Date.now();
-function drillCard(d, opts = {}) {
-  const box = h("div", { class: "drill" });
-  let fresh = false;
-  const paint = d => {
-    const att = d.attempts || [], last = att[att.length - 1], l = d.lesson;
-    const when = d.status === "graduated" ? "Learned" : dueNow(d) ? "Due today"
-      : "Next " + new Date(d.due * 1000).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-    const del = h("button", { class: "x", type: "button" }, "Remove");
-    del.addEventListener("click", async () => {
-      if (!del.classList.contains("sure")) { del.classList.add("sure"); del.textContent = "Tap to confirm"; setTimeout(() => { del.classList.remove("sure"); del.textContent = "Remove"; }, 3000); return; }
-      await api.delDrill(d.id); await loadTakes(); box.remove();
-    });
-    box.replaceChildren(...[
-      h("div", { class: "dh" }, h("div", {}, h("div", { class: "k" }, l.area + " · " + when), h("b", {}, d.title)),
-        h("div", { class: "dots", title: att.map(a => GRADES[a.feedback?.grade]?.[1] || "…").join(", ") },
-          att.slice(-8).map(a => h("i", { class: a.feedback?.grade || "pending" })))),
-      h("details", { open: !att.length || opts.inLesson },
-        h("summary", {}, l.exercise), l.steps?.length ? h("ol", {}, l.steps.map(x => h("li", {}, x.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")))) : null,
-        l.feel ? h("p", { class: "note" }, "When it’s working: " + l.feel.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")) : null),
-      recWidget("drill", () => ({ label: d.title, drill_id: d.id }), async () => { await loadTakes(); fresh = true; paint(DRILLS.find(x => x.id === d.id) || d); }),
-      last ? h("details", { class: "last", open: fresh || opts.inLesson || !last.feedback },
-        h("summary", {}, "Last try: ", last.feedback ? (GRADES[last.feedback.grade] || GRADES.almost).join(" ") : "being graded…"),
-        attemptRow(last, () => api.drills().then(ds => { DRILLS = ds; paintTabs(); paint(ds.find(x => x.id === d.id) || d); }))) : null,
-      att.length > 1 ? h("details", { class: "older" }, h("summary", {}, (att.length - 1) + " earlier attempt" + (att.length > 2 ? "s" : "")),
-        att.slice(0, -1).reverse().map(a => attemptRow(a))) : null,
-      opts.inLesson ? null : h("div", { class: "bar", style: "margin-top:4px" }, del)].filter(Boolean));
-  };
-  paint(d);
-  return box;
-}
-/* Your latest graded attempt at a step, with the rest folded away. */
-function stepAttempts(kind) {
+function stepAttempts(kind, freeOnly) {
   const box = h("div", {});
   const paint = () => {
-    const att = TAKES.filter(t => t.kind === kind);
+    const att = TAKES.filter(t => t.kind === kind && !(freeOnly && t.lesson_id));
     box.replaceChildren(...[att[0] ? attemptRow(att[0], async () => { await loadTakes(); paint(); }) : null,
       att.length > 1 ? h("details", { class: "older" }, h("summary", {}, (att.length - 1) + " earlier attempt" + (att.length > 2 ? "s" : "")),
         att.slice(1).map(a => attemptRow(a))) : null].filter(Boolean));
   };
   paint(); box.paint = paint;
   return box;
-}
-/* Drills tab: every exercise your coach has given you. */
-function renderDrills(v) {
-  const due = DRILLS.filter(dueNow), soon = DRILLS.filter(d => d.status === "active" && !dueNow(d)).sort((a, b) => a.due - b.due),
-    learned = DRILLS.filter(d => d.status !== "active");
-  v.append(h("div", { class: "head" }, h("h2", {}, "Drills")),
-    h("p", { class: "how" }, "Every exercise your coach gives you lands here. Record one and it gets graded; pass it on schedule and it comes back less often, until it’s learned."),
-    h("div", { class: "stats" }, h("div", { class: "stat" }, h("b", {}, due.length), h("span", {}, "due today")),
-      h("div", { class: "stat" }, h("b", {}, soon.length), h("span", {}, "practising")), h("div", { class: "stat" }, h("b", {}, learned.length), h("span", {}, "learned"))));
-  if (!DRILLS.length) v.append(h("div", { class: "empty" }, "No drills yet. Record a read and your coach’s exercises will show up here."));
-  if (due.length) v.append(h("h3", { class: "sec" }, "Due today"), ...due.map(d => drillCard(d)));
-  if (soon.length) v.append(h("h3", { class: "sec" }, "Coming up"), ...soon.map(d => drillCard(d)));
-  if (learned.length) v.append(h("details", { class: "older" }, h("summary", {}, "Learned (" + learned.length + ")"), learned.map(d => drillCard(d))));
 }
 function attemptRow(t, onDone) {
   const audio = h("audio", { controls: true, preload: "none", src: "api/takes/" + encodeURIComponent(t.id) + "/audio" });
@@ -578,7 +549,7 @@ function moment(m, audio) {
   return row;
 }
 
-function takeRow(t, onDelete, tag, open) {
+function takeRow(t, onDelete, tag, open, readonly) {
   const x = h("button", { class: "x", type: "button" }, "Delete");
   x.addEventListener("click", async () => {
     if (!x.classList.contains("sure")) { x.classList.add("sure"); x.textContent = "Tap to confirm"; setTimeout(() => { x.classList.remove("sure"); x.textContent = "Delete"; }, 3000); return; }
@@ -588,7 +559,7 @@ function takeRow(t, onDelete, tag, open) {
   const audio = h("audio", { controls: true, preload: "metadata", src: "api/takes/" + encodeURIComponent(t.id) + "/audio" });
   return h("div", { class: "take" },
     h("span", { class: "d" }, d.toLocaleDateString(undefined, { month: "short", day: "numeric" })),
-    h("span", { class: "tag" }, [sessionOf(t), tag, t.label !== tag ? t.label : null, fmt(t.secs)].filter(Boolean).join(" · ")), x,
+    h("span", { class: "tag" }, [sessionOf(t), tag, t.label !== tag ? t.label : null, fmt(t.secs)].filter(Boolean).join(" · ")), readonly ? "" : x,
     audio, feedbackPanel(t, audio, open));
 }
 
@@ -633,10 +604,10 @@ function makeTimer(total, onTick, onEnd) {
 
 /* ---------- content ---------- */
 const WARMUP = [
-  ["Hum", "Lips closed, hum low to high and back. Feel the buzz in your lips and nose.", 15],
-  ["Lip trills", "Blow through loose lips like a motorboat, sliding the pitch up and down.", 15],
-  ["Jaw and tongue", "Big yawns, chew slowly with your mouth open, tongue circles behind the lips.", 15],
-  ["Sirens", "Slide on “ng” or “ooo” from your lowest note to your highest, slowly.", 15],
+  ["Align and release", "Stand tall, feet under hips, knees soft. Roll your shoulders, drop your jaw, let your head float.", 15],
+  ["Breath", "Hand on your lower ribs. Breathe in low so they swing out, then hiss out slowly on “sss”.", 15],
+  ["Hum and trills", "Hum into a buzz on your lips, then lip trill like a motorboat, sliding the pitch up and down.", 15],
+  ["Sirens and tongue", "Slide on “ng” from low to high and back; then stretch your tongue out and circle it.", 15],
 ];
 const ENUNCIATE = [
   { t: "Hamlet’s advice to the players", a: "William Shakespeare", p: [
@@ -671,7 +642,7 @@ function buildPages() {
 /* ---------- day log ---------- */
 function dayLog() { return store.get("days", {}); }
 function markStep(id) {
-  const d = dayLog(); const k = today(); d[k] ||= []; if (!d[k].includes(id)) d[k].push(id); store.set("days", d); paintNav(); paintHud();
+  const d = dayLog(); const k = today(); d[k] ||= []; if (!d[k].includes(id)) d[k].push(id); store.set("days", d); paintHud();
 }
 const dayStr = dt => dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
 /* Days in a row with any practice, counting today only once you've practised (so the streak doesn't drop to 0 each morning). */
@@ -683,152 +654,298 @@ function streak() {
   }
   return n;
 }
-const CORE = ["warm", "read", "shadow", "enun"];
-const doneToday = () => (dayLog()[today()] || []).filter(x => CORE.includes(x)).length;
 function paintHud() {
-  const n = streak(), el = $("#hud");
-  el.replaceChildren(h("span", { class: "chip" + (n ? " hot" : ""), title: "Day streak" }, "🔥 " + n),
-    h("span", { class: "chip", title: "Today's steps" }, doneToday() + "/4 today"));
+  const n = streak();
+  $("#hud").replaceChildren(h("span", { class: "chip" + (n ? " hot" : ""), title: "Day streak" }, "🔥 " + n));
 }
 
-/* ---------- steps ---------- */
-const STEPS = [
-  { id: "warm", name: "Warm up", mins: 1, render: renderWarm },
-  { id: "read", name: "Read", mins: 2, render: renderRead },
-  { id: "shadow", name: "Shadow", mins: 2, render: renderShadow },
-  { id: "enun", name: "Enunciate", mins: 1, render: renderEnun },
-  { id: "week", name: "Weekly", mins: 0, render: renderWeek },
-];
+/* ---------- navigation: Today (the lesson), Practice (free play), Journey (your path and history) ---------- */
 const ICON = {
   today: '<svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg>',
-  drills: '<svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><path d="m16 17 2 2 4-4"/></svg>',
-  coach: '<svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+  practice: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4z"/></svg>',
+  journey: '<svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
 };
-const TABS = [{ id: "today", name: "Today" }, { id: "drills", name: "Drills", render: renderDrills }, { id: "coach", name: "Progress", render: renderProgress }];
-const tabOf = id => TABS.some(t => t.id === id && t.render) ? id : "today";
+const TABS = [{ id: "today", name: "Today", render: renderToday }, { id: "practice", name: "Practice", render: renderPractice }, { id: "journey", name: "Journey", render: renderJourney }];
+let current = store.get("tab", "today"), cleanup = null;
 function paintTabs() {
-  const due = DRILLS.filter(dueNow).length, at = tabOf(current);
+  const todo = LESSON && LESSON.date === today() && LESSON.status !== "done";
   $("#tabs").replaceChildren(...TABS.map(t => {
-    const b = h("button", { type: "button", "aria-current": t.id === at ? "page" : "false" }, h("span", {}), t.name,
-      t.id === "drills" && due ? h("span", { class: "badge", "aria-label": due + " due" }, due) : null);
+    const b = h("button", { type: "button", "aria-current": t.id === current ? "page" : "false" }, h("span", {}), t.name,
+      t.id === "today" && todo && current !== "today" ? h("span", { class: "badge", "aria-label": "Lesson not done" }, "1") : null);
     b.firstChild.innerHTML = ICON[t.id];
-    b.addEventListener("click", () => go(t.id === "today" ? (STEPS.some(s => s.id === store.get("step")) ? store.get("step") : "warm") : t.id));
+    b.addEventListener("click", () => go(t.id));
     return b;
   }));
 }
-let current = store.get("step", "warm");
-function paintNav() {
-  const nav = $("#steps"); nav.innerHTML = ""; const done = dayLog()[today()] || [];
-  nav.hidden = tabOf(current) !== "today"; $("#foot").hidden = current !== "coach";
-  for (const s of STEPS) {
-    const b = h("button", { type: "button", "aria-current": String(s.id === current), class: done.includes(s.id) ? "done" : "" },
-      h("span", {}, s.name), h("small", {}, s.mins ? s.mins + " min" : weekDue() ? "due" : "1× a week"));
-    b.addEventListener("click", () => go(s.id));
-    nav.append(b);
-  }
-  paintTabs();
-}
-let cleanup = null;
-function go(id) {
+function go(id, arg) {
   if (cleanup) { cleanup(); cleanup = null; }
   if (recorder.live) recorder.stop();
-  current = id; if (STEPS.some(s => s.id === id)) store.set("step", id); store.set("tab", tabOf(id)); paintNav();
+  if (!TABS.some(t => t.id === id)) id = "today";
+  current = id; store.set("tab", id); paintTabs(); paintHud();
+  $("#foot").hidden = id !== "journey";
   const v = $("#view"); v.innerHTML = "";
-  (STEPS.find(s => s.id === id) || TABS.find(t => t.id === id)).render(v);
+  TABS.find(t => t.id === id).render(v, arg);
   window.scrollTo({ top: 0 });
 }
-function nextBtn(id) {
-  const i = STEPS.findIndex(s => s.id === id), nx = STEPS[i + 1];
-  return h("button", { class: "btn primary", type: "button", onclick: () => { markStep(id); nx && nx.id !== "week" ? go(nx.id) : finish(); } },
-    nx && nx.id !== "week" ? "Done, next: " + nx.name : "Finish today");
-}
-function finish() {
-  markStep("enun");
-  const v = $("#view"); v.innerHTML = "";
-  const n = streak(), due = DRILLS.filter(dueNow).length;
-  v.append(h("div", { class: "card done-card" },
-      h("div", { class: "note" }, "Session complete"),
-      h("div", { class: "big" }, "🔥 " + n), h("div", {}, n === 1 ? "day streak. Good start." : "days in a row. Keep it going."),
-      h("p", { class: "how", style: "margin:14px auto 0" }, weekDue() ? "Your weekly recording is due. It takes about a minute."
-        : due ? due + (due === 1 ? " drill is" : " drills are") + " still due today." : "Your coach will have tomorrow’s plan ready.")),
-    h("div", { class: "bar", style: "justify-content:center" },
-      weekDue() ? h("button", { class: "btn primary", type: "button", onclick: () => go("week") }, "Record the weekly page")
-        : due ? h("button", { class: "btn primary", type: "button", onclick: () => go("drills") }, "Practise drills") : "",
-      h("button", { class: "btn", type: "button", onclick: () => go("coach") }, "See progress")));
-}
-
 function stepHead(title, secs, how, onTick) {
   const timer = makeTimer(secs, onTick, () => {});
-  const wrap = h("div", {}, h("div", { class: "head" }, h("h2", {}, title), timer.el), h("p", { class: "how" }, how));
+  const wrap = h("div", {}, h("div", { class: "head" }, h("h2", {}, title), secs ? timer.el : ""), how ? h("p", { class: "how" }, how) : "");
   return { wrap, timer };
 }
+const STAGE = { current: "Current focus", review: "In review", queued: "Up next", learned: "Learned" };
+const fmtDay = ts => new Date(ts).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+const plain = t => (t || "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/\*+([^*]+)\*+/g, "$1");
 
-function renderWarm(v, standard) {
-  const moves = !standard && PLAN?.warmup?.length ? PLAN.warmup.map(w => [w.name, w.cue, Math.max(8, Math.min(30, w.secs || 15))]) : WARMUP;
-  const total = moves.reduce((a, m) => a + m[2], 0);
+/* ---------- Today: one lesson a day, fixed once started, done in order ---------- */
+let LESSON = null;
+function nextReadPage() {
+  const last = LESSONS.find(l => l.kind === "daily");
+  if (last) return last.page % (PAGES.length - 1) + 1;
+  const n = /^Page (\d+)$/.exec(TAKES.find(t => t.kind === "daily")?.label || "");
+  return n ? Math.min(+n[1], PAGES.length - 1) || 1 : 1;   // page 0 is kept for check-ins
+}
+async function renderToday(v) {
+  if (!LESSON || LESSON.date !== today()) {
+    v.append(h("p", { class: "how" }, "Getting today’s lesson…"));
+    try { LESSON = await api.lesson(today(), nextReadPage()); } catch { v.replaceChildren(h("div", { class: "empty" }, "Couldn’t load today’s lesson. Check your connection and try again.")); return; }
+    await loadTakes(); paintTabs();
+    if (current !== "today") return;
+    v.innerHTML = "";
+  }
+  if (LESSON.status === "done") return lessonDone(v, LESSON);
+  const L = LESSON, steps = lessonSteps(L), key = "lessonStep:" + L.id;
+  let i = Math.min(store.get(key, 0), steps.length - 1);
+  const bar = h("div", { class: "lbar" }, steps.map(() => h("i")));
+  const title = h("div", { class: "lhead" });
+  const body = h("div", {});
+  const back = h("button", { class: "linkbtn", type: "button" }, "‹ Back");
+  const nextB = h("button", { class: "btn primary grow", type: "button" });
+  const show = () => {
+    if (cleanup) { cleanup(); cleanup = null; }
+    if (recorder.live) recorder.stop();
+    store.set(key, i);
+    [...bar.children].forEach((e, j) => e.className = j < i ? "done" : j === i ? "now" : "");
+    title.replaceChildren(h("span", {}, (L.kind === "checkin" ? "Check-in · " : "") + "Lesson " + L.n), h("span", {}, (i + 1) + " of " + steps.length));
+    body.innerHTML = "";
+    steps[i].render(body, L);
+    back.hidden = i === 0;
+    nextB.textContent = i === steps.length - 1 ? "Finish lesson" : "Continue";
+    window.scrollTo({ top: 0 });
+  };
+  back.onclick = () => { i--; show(); };
+  nextB.onclick = async () => {
+    if (i < steps.length - 1) { i++; return show(); }
+    nextB.disabled = true;
+    LESSON = await api.done(L.id); markStep("lesson"); await loadTakes(); go("today");
+  };
+  v.append(title, bar, body, h("div", { class: "lnav" }, back, nextB));
+  show();
+}
+function lessonSteps(L) {
+  const s = [{ id: "warm", render: stepWarm }];
+  if (L.review) s.push({ id: "review", render: stepReview });
+  if (L.focus) s.push({ id: "drill", render: stepDrill });
+  s.push({ id: "read", render: stepRead });
+  if (L.kind !== "checkin") s.push({ id: "shadow", render: stepShadow });
+  return s;
+}
+const lessonTakes = (L, step) => TAKES.filter(t => t.lesson_id === L.id && t.step === step);
+/* A record button plus your latest attempt for this step; earlier tries are folded away. */
+function stepRecorder(L, step, kind, meta) {
+  const out = h("div", {});
+  const paint = () => {
+    const att = lessonTakes(L, step).slice().sort((a, b) => b.ts - a.ts);
+    out.replaceChildren(...[recWidget(kind, () => ({ ...meta(), lesson_id: L.id, step }), paint),
+      att[0] ? attemptRow(att[0], async () => { await loadTakes(); paint(); }) : null,
+      att.length > 1 ? h("details", { class: "older" }, h("summary", {}, (att.length - 1) + " earlier tr" + (att.length > 2 ? "ies" : "y")), att.slice(1).map(a => attemptRow(a))) : null].filter(Boolean));
+  };
+  paint();
+  return out;
+}
+function exerciseBlock(d, open) {
+  const l = d.lesson;
+  return h("details", { class: "exb", open },
+    h("summary", {}, l.exercise),
+    l.steps?.length ? h("ol", {}, l.steps.map(x => h("li", {}, plain(x)))) : "",
+    l.feel ? h("p", { class: "note" }, "When it’s working: " + plain(l.feel)) : "",
+    l.dose ? h("p", { class: "note" }, plain(l.dose)) : "");
+}
+function stepWarm(v, L) {
   const list = h("ol", { class: "moves" });
   let acc = 0;
-  const items = moves.map(([n, d, s]) => { const li = h("li", {}, h("span", { class: "t" }, fmt(acc) ), h("div", {}, h("b", {}, n), h("small", {}, d))); acc += s; list.append(li); return li; });
-  const { wrap, timer } = stepHead("Warm up", total, moves === WARMUP ? "Tap the timer and follow along. Fifteen seconds each, loose and easy."
-      : PLAN.why || "Your coach picked these from your last review. Tap the timer and follow along.", el => {
-    let a = 0; items.forEach((li, i) => { li.classList.toggle("now", el >= a && el < a + moves[i][2]); a += moves[i][2]; });
+  const items = WARMUP.map(([n, d, s]) => { const li = h("li", {}, h("span", { class: "t" }, fmt(acc)), h("div", {}, h("b", {}, n), h("small", {}, d))); acc += s; list.append(li); return li; });
+  const { wrap, timer } = stepHead("Warm up", acc, "Tap the timer and follow along: body, breath, then sound.", el => {
+    let a = 0; items.forEach((li, i) => { li.classList.toggle("now", el >= a && el < a + WARMUP[i][2]); a += WARMUP[i][2]; });
   });
-  const swap = moves === WARMUP ? (PLAN?.warmup?.length ? h("button", { class: "linkbtn", type: "button", onclick: () => { cleanup(); v.innerHTML = ""; renderWarm(v); } }, "Use my coach’s warm-up") : null)
-    : h("button", { class: "linkbtn", type: "button", onclick: () => { cleanup(); v.innerHTML = ""; renderWarm(v, true); } }, "Use the standard warm-up instead");
-  const due = DRILLS.filter(dueNow).slice(0, 3);
-  v.append(wrap, ...(due.length ? [h("h4", { class: "sub" }, "Due drills"), ...due.map(d => drillCard(d)), h("h4", { class: "sub" }, "Then")] : []),
-    list, h("div", { class: "bar" }, nextBtn("warm"), swap ?? ""));
+  v.append(wrap, list);
   cleanup = () => timer.stop();
 }
-
-function renderRead(v) {
-  let pi = Math.min(store.get("page", 0), PAGES.length - 1);
-  const { wrap, timer } = stepHead("Read aloud", 120,
-    "Tap the few words that matter to mark them, then record one read of the page with bigger pitch movement on the marked words.");
-  const card = h("div", { class: "card" });
-  const pos = h("span", { class: "note grow" });
-  const prev = h("button", { class: "btn ghost", type: "button", "aria-label": "Previous page" }, "←");
-  const next = h("button", { class: "btn ghost", type: "button", "aria-label": "Next page" }, "→");
-  const takes = h("div", { class: "takes" });
+function stepReview(v, L) {
+  const d = L.review;
+  v.append(h("div", { class: "head" }, h("h2", {}, "Quick review")),
+    h("p", { class: "how" }, "A focus you passed before, back to check it stuck: " + d.title + "."),
+    exerciseBlock(d, false), stepRecorder(L, "review", "drill", () => ({ label: d.title, drill_id: d.id })));
+}
+function stepDrill(v, L) {
+  const d = L.focus, l = d.lesson;
+  v.append(h("div", { class: "head" }, h("h2", {}, d.title)),
+    h("div", { class: "pass" }, [...Array(3)].map((_, j) => h("i", { class: j < d.passes ? "on" : "" })),
+      h("span", {}, d.passes >= 3 ? "Passed" : d.passes + " of 3 days passed")),
+    l.why ? h("p", { class: "how" }, plain(l.why)) : "",
+    exerciseBlock(d, true),
+    h("p", { class: "note" }, "Do the exercise, recording as you go. Your coach grades it in about 30 seconds."),
+    stepRecorder(L, "drill", "drill", () => ({ label: d.title, drill_id: d.id })));
+}
+function stepRead(v, L) {
+  const checkin = L.kind === "checkin";
+  v.append(h("div", { class: "head" }, h("h2", {}, checkin ? "Check-in read" : "Read aloud")),
+    h("p", { class: "how" }, checkin ? "Every seventh lesson you read this same page, so you can hear how far you’ve come. Tap the words that matter, then record."
+      : "Tap the few words that matter to mark them, then record one read of the page."),
+    L.focus ? h("div", { class: "focus" }, h("span", { class: "lbl" }, "Keep your focus"), h("span", {}, L.focus.title)) : "",
+    !L.focus && L.n === 1 ? h("p", { class: "note" }, "This first read is your baseline. Your coach listens to it and picks your first focus.") : "",
+    pageCard(L.page),
+    stepRecorder(L, "read", checkin ? "weekly" : "daily", () => pageMeta(L.page, checkin ? "Check-in page" : "Page " + (L.page + 1))),
+    h("p", { class: "note" }, "Your coach’s full notes on this read arrive in a minute or two. You’ll see them when you finish the lesson."));
+}
+function stepShadow(v, L) {
+  const p = shadowPlayer({ rec: (meta, after, onStart) => stepRecorderFor(L, meta, after, onStart) });
+  v.append(h("div", { class: "head" }, h("h2", {}, "Shadow")),
+    h("p", { class: "how" }, "Tap Record, then Play. Say each sentence straight back, copying the narrator’s pitch, pauses and stress. A few sentences is plenty."),
+    L.focus ? h("div", { class: "focus" }, h("span", { class: "lbl" }, "Keep your focus"), h("span", {}, L.focus.title)) : "", p.el);
+  cleanup = p.stop;
+}
+function stepRecorderFor(L, meta, after, onStart) {
+  const out = h("div", {});
   const paint = () => {
-    const pg = PAGES[pi], key = "marks:" + pi, marks = new Set(store.get(key, []));
-    card.innerHTML = ""; let wi = 0;
-    const text = h("div", { class: "text" });
-    for (const p of pg.paras) {
-      const el = h("p");
-      p.split(" ").forEach((w, j) => {
-        const i = wi++;
-        const s = h("span", { class: "w" + (marks.has(i) ? " mk" : "") }, w);
-        s.addEventListener("click", () => { marks.has(i) ? marks.delete(i) : marks.add(i); s.classList.toggle("mk"); store.set(key, [...marks]); });
-        el.append(s, " ");
-      });
-      text.append(el);
-    }
-    card.append(text, h("div", { class: "src" }, pg.book.title + ", " + pg.book.author));
-    pos.textContent = "Page " + (pi + 1) + " of " + PAGES.length;
-    prev.disabled = pi === 0; next.disabled = pi === PAGES.length - 1;
-    store.set("page", pi);
+    const att = lessonTakes(L, "shadow").slice().sort((a, b) => b.ts - a.ts);
+    out.replaceChildren(...[recWidget("shadow", () => ({ ...meta(), lesson_id: L.id, step: "shadow" }), () => { paint(); after && after(); }, onStart),
+      att[0] ? attemptRow(att[0], async () => { await loadTakes(); paint(); }) : null].filter(Boolean));
   };
-  const paintTakes = () => {
-    const all = TAKES.filter(t => t.kind === "daily").slice(0, 3);
-    takes.innerHTML = "";
-    if (all.length) takes.append(h("div", { class: "note" }, "Recent takes · all of them are under Progress"), ...all.map((t, i) => takeRow(t, paintTakes, null, i === 0)));
-  };
-  prev.onclick = () => { pi--; paint(); }; next.onclick = () => { pi++; paint(); };
   paint();
-  v.append(wrap, focusNote(PLAN?.read_focus), h("div", { class: "bar", style: "margin:0 0 10px" }, prev, pos, next), card,
-    recWidget("daily", () => pageMeta(pi, "Page " + (pi + 1)), paintTakes),
-    takes, h("div", { class: "bar" }, nextBtn("read")));
-  paintTakes();
-  cleanup = () => timer.stop();
+  return out;
+}
+/* The finished lesson: read-only results, updating as the coach's grades arrive. */
+function lessonDone(v, L) {
+  const n = streak();
+  v.append(h("div", { class: "card done-card" },
+    h("div", { class: "note" }, (L.kind === "checkin" ? "Check-in · " : "") + "Lesson " + L.n + " complete"),
+    h("div", { class: "big" }, "🔥 " + n), h("div", {}, n === 1 ? "day streak" : "days in a row"),
+    h("p", { class: "how", style: "margin:12px auto 0" }, "Your next lesson is ready tomorrow. Want more today? Anything you’ve been given is in Practice.")),
+    h("div", { class: "bar", style: "justify-content:center;margin-bottom:8px" }, h("button", { class: "btn primary", type: "button", onclick: () => go("practice") }, "Practise more")),
+    lessonResults(L, true));
+}
+function lessonResults(L, open) {
+  const box = h("div", {});
+  const order = [["review", "Quick review"], ["drill", "Focus drill"], ["read", L.kind === "checkin" ? "Check-in read" : "Read"], ["shadow", "Shadowing"]];
+  for (const [step, name] of order) {
+    const att = lessonTakes(L, step).slice().sort((a, b) => b.ts - a.ts);
+    if (!att.length) continue;
+    const t = att[0];
+    box.append(h("h3", { class: "sec" }, name + (step === "drill" && L.focus ? ": " + L.focus.title : step === "review" && L.review ? ": " + L.review.title : "")),
+      QUICK[t.kind] ? attemptRow(t) : takeRow(t, null, null, open, true));
+  }
+  if (!box.children.length) box.append(h("p", { class: "note" }, "No recordings in this lesson."));
+  return box;
 }
 
-/* Shadowing: play one sentence, pause for you to repeat, move on. */
-function renderShadow(v) {
+/* ---------- Practice: free play with anything you've been given ---------- */
+const PRACTICE = [
+  ["exercises", "Your exercises", "Any focus your coach has given you. Practice here doesn’t change your lessons."],
+  ["read", "Read any page", "Pick a page, record it, get full coach notes."],
+  ["shadow", "Shadow a narrator", "Any of the four books, as many sentences as you like."],
+  ["enun", "Enunciation passages", "Tongue-twisters and verse for crisp consonants."],
+  ["upload", "Upload a recording", "A voice memo or any audio file."],
+];
+function renderPractice(v, sub) {
+  if (!sub) {
+    v.append(h("div", { class: "head" }, h("h2", {}, "Practice")),
+      h("p", { class: "how" }, "Free play. Work on whatever you like, as long as you like; every recording gets coach feedback."),
+      h("div", { class: "menu" }, PRACTICE.map(([id, name, how]) =>
+        h("button", { type: "button", onclick: () => go("practice", id) }, h("b", {}, name), h("span", {}, how), h("i", {}, "›")))));
+    return;
+  }
+  const [, name, how] = PRACTICE.find(p => p[0] === sub);
+  v.append(h("button", { class: "linkbtn", type: "button", onclick: () => go("practice") }, "‹ Practice"),
+    h("div", { class: "head" }, h("h2", {}, name)), h("p", { class: "how" }, how));
+  if (sub === "exercises") {
+    if (!DRILLS.length) v.append(h("div", { class: "empty" }, "Nothing yet. Finish a lesson and your coach’s exercises show up here."));
+    for (const d of DRILLS) v.append(exerciseCard(d));
+  } else if (sub === "read") {
+    let pi = Math.min(store.get("practicePage", 1), PAGES.length - 1);
+    const holder = h("div", {});
+    const pos = h("span", { class: "note grow" });
+    const prev = h("button", { class: "btn ghost", type: "button", "aria-label": "Previous page" }, "←");
+    const next = h("button", { class: "btn ghost", type: "button", "aria-label": "Next page" }, "→");
+    const paint = () => { store.set("practicePage", pi); pos.textContent = "Page " + (pi + 1) + " of " + PAGES.length; prev.disabled = pi === 0; next.disabled = pi === PAGES.length - 1;
+      holder.replaceChildren(pageCard(pi), recWidget("daily", () => pageMeta(pi, "Page " + (pi + 1)), () => { holder.querySelector(".takes")?.remove(); holder.append(recentReads()); }), recentReads()); };
+    prev.onclick = () => { pi--; paint(); }; next.onclick = () => { pi++; paint(); };
+    v.append(h("div", { class: "bar", style: "margin:0 0 10px" }, prev, pos, next), holder); paint();
+  } else if (sub === "shadow") {
+    const p = shadowPlayer({ rec: (meta, after, onStart) => { const a = stepAttempts("shadow", true);
+      return h("div", {}, recWidget("shadow", meta, () => { a.paint(); after && after(); }, onStart), a); } });
+    v.append(p.el); cleanup = p.stop;
+  } else if (sub === "enun") {
+    let k = store.get("enunPick", 0) % ENUNCIATE.length;
+    const card = h("div", { class: "card" });
+    const paint = () => { const e = ENUNCIATE[k]; card.replaceChildren(h("div", { class: "text" }, e.p.map(p => h("p", {}, p))), h("div", { class: "src" }, e.t + ", " + e.a)); };
+    const other = h("button", { class: "btn ghost", type: "button", onclick: () => { k = (k + 1) % ENUNCIATE.length; store.set("enunPick", k); paint(); } }, "Different passage");
+    const att = stepAttempts("enun");
+    paint();
+    v.append(h("p", { class: "note" }, "Read it once slowly, exaggerating every mouth movement, then once at normal speed. Record both."),
+      card, h("div", { class: "bar" }, other), recWidget("enun", () => ({ label: ENUNCIATE[k].t, text: ENUNCIATE[k].p.join("\n") }), () => att.paint()), att);
+  } else if (sub === "upload") {
+    v.append(uploadWidget(() => go("journey")));
+  }
+}
+function recentReads() {
+  const r = TAKES.filter(t => t.kind === "daily" && !t.lesson_id).slice(0, 1);
+  return h("div", { class: "takes" }, r.map(t => takeRow(t, null, "Latest practice read", true)));
+}
+/* One exercise in free play: the steps, a record button, your latest try. Doesn't move your curriculum. */
+function exerciseCard(d) {
+  const box = h("details", { class: "drill" });
+  let painted = false;
+  const paint = () => {
+    const att = (d.attempts || []).slice().sort((a, b) => b.ts - a.ts);
+    box.replaceChildren(...[
+      h("summary", {}, h("div", { class: "dh" }, h("div", {}, h("div", { class: "k" }, d.area + " · " + STAGE[d.stage]), h("b", {}, d.title)),
+        h("div", { class: "dots" }, att.slice(0, 8).reverse().map(a => h("i", { class: a.feedback?.grade || "pending" }))))),
+      exerciseBlock(d, true),
+      recWidget("drill", () => ({ label: d.title, drill_id: d.id }), async () => { await loadTakes(); d = DRILLS.find(x => x.id === d.id) || d; paint(); }),
+      att[0] ? attemptRow(att[0], async () => { await loadTakes(); d = DRILLS.find(x => x.id === d.id) || d; paint(); }) : null,
+      att.length > 1 ? h("details", { class: "older" }, h("summary", {}, (att.length - 1) + " earlier tr" + (att.length > 2 ? "ies" : "y")), att.slice(1).map(a => attemptRow(a))) : null].filter(Boolean));
+  };
+  box.addEventListener("toggle", () => { if (box.open && !painted) { painted = true; paint(); box.open = true; } });
+  box.append(h("summary", {}, h("div", { class: "dh" }, h("div", {}, h("div", { class: "k" }, d.area + " · " + STAGE[d.stage]), h("b", {}, d.title)))));
+  return box;
+}
+
+/* ---------- shared pieces: a page to read, the shadowing player ---------- */
+/* What the coach needs to know about a page: its text and the words you marked. */
+function pageMeta(pi, label) {
+  const pg = PAGES[pi], words = pg.paras.join(" ").split(" "), marks = store.get("marks:" + pi, []);
+  return { label, text: pg.paras.join("\n\n"), marks: marks.sort((a, b) => a - b).map(i => words[i]).filter(Boolean) };
+}
+function pageCard(pi) {
+  const pg = PAGES[pi], key = "marks:" + pi, marks = new Set(store.get(key, []));
+  const text = h("div", { class: "text" }); let wi = 0;
+  for (const p of pg.paras) {
+    const el = h("p");
+    p.split(" ").forEach(w => {
+      const i = wi++;
+      const s = h("span", { class: "w" + (marks.has(i) ? " mk" : "") }, w);
+      s.addEventListener("click", () => { marks.has(i) ? marks.delete(i) : marks.add(i); s.classList.toggle("mk"); store.set(key, [...marks]); });
+      el.append(s, " ");
+    });
+    text.append(el);
+  }
+  return h("div", { class: "card" }, text, h("div", { class: "src" }, pg.book.title + ", " + pg.book.author + " · page " + (pi + 1)));
+}
+/* Shadowing: play one sentence, pause for you to repeat, move on. opts.rec(meta, after, onStart) builds the record area. */
+function shadowPlayer(opts) {
   const audio = $("#player");
   let bi = store.get("book", 0); if (!BOOKS[bi]) bi = 0;
   let flat = [], idx = 0, phase = "idle", raf = 0, gapT = 0;
-  const auto = h("input", { type: "checkbox", id: "auto" }); auto.checked = store.get("auto", true);
   const slow = h("input", { type: "checkbox", id: "slow" }); slow.checked = store.get("slow", false);
   const sel = h("select", { id: "book", "aria-label": "Book" }, BOOKS.map((b, i) => h("option", { value: i }, b.title + ", " + b.author)));
   sel.value = bi;
@@ -838,23 +955,17 @@ function renderShadow(v) {
   const prevB = h("button", { class: "btn", type: "button", "aria-label": "Previous sentence" }, "←");
   const againB = h("button", { class: "btn", type: "button" }, "Again");
   const nextB = h("button", { class: "btn", type: "button", "aria-label": "Next sentence" }, "→");
-  const src = h("div", { class: "src" });
-  const { wrap, timer } = stepHead("Shadow", 120,
-    "Listen to one sentence, then say it back right away, copying the narrator’s pitch, pauses, and stress. Tap any sentence to jump there.");
-
   const load = () => {
     const b = BOOKS[bi]; flat = []; box.innerHTML = "";
     b.paras.forEach(p => { const el = h("p"); p.forEach(s => { const i = flat.length; const sp = h("span", { class: "s" }, s.t); sp.addEventListener("click", () => { stop(); idx = i; paint(true); play(); }); flat.push({ ...s, el: sp }); el.append(sp, " "); }); box.append(el); });
     idx = Math.min(store.get("pos:" + b.id, 0), flat.length - 1);
     audio.src = b.audio; audio.preload = "auto";
-    src.innerHTML = ""; src.append(b.why ? b.why + " " : "", "Read by " + b.reader + " for ", h("a", { href: b.source, target: "_blank", rel: "noopener" }, "LibriVox"), ". Text from ", h("a", { href: b.text, target: "_blank", rel: "noopener" }, "Project Gutenberg"), ".");
     paint(true);
   };
   const paint = (scroll) => {
     flat.forEach((s, i) => { s.el.classList.toggle("cur", i === idx); s.el.classList.toggle("played", i < idx); });
     store.set("pos:" + BOOKS[bi].id, idx);
-    if (scroll && flat[idx]) { const el = flat[idx].el; box.scrollTop = el.offsetTop - 60; }
-    const s = flat[idx];
+    if (scroll && flat[idx]) box.scrollTop = flat[idx].el.offsetTop - 60;
     if (phase === "idle") state.textContent = "Sentence " + (idx + 1) + " of " + flat.length;
     state.classList.toggle("you", phase === "you");
     playB.textContent = phase === "idle" ? "Play sentence" : "Pause";
@@ -862,7 +973,6 @@ function renderShadow(v) {
   const stop = () => { cancelAnimationFrame(raf); clearTimeout(gapT); audio.pause(); phase = "idle"; paint(); };
   const play = () => {
     const s = flat[idx]; if (!s) return;
-    if (!timer.running) timer.start();
     phase = "listen"; audio.playbackRate = slow.checked ? 0.85 : 1;
     const begin = () => { audio.currentTime = s.s; audio.play().catch(() => { phase = "idle"; state.textContent = "Tap Play again to start the audio."; paint(); }); tick(); };
     if (audio.readyState >= 1) begin(); else { state.textContent = "Loading audio…"; audio.addEventListener("loadedmetadata", begin, { once: true }); audio.load(); }
@@ -877,15 +987,10 @@ function renderShadow(v) {
       audio.pause();
       phase = "you";
       if (recorder.live && recT0) { endTurn(); shadowed.push({ text: s.t, ns: s.s, ne: s.e, you_at: (Date.now() - recT0) / 1000 }); }
-      const gap = Math.max(1.5, (s.e - s.s) / audio.playbackRate * 1.15 + 0.6);
-      let left = gap;
+      let left = Math.max(1.5, (s.e - s.s) / audio.playbackRate * 1.15 + 0.6);
       const step = () => {
         state.textContent = "Your turn: say it back  " + Math.ceil(left) + "s";
-        if (left <= 0) {
-          endTurn();
-          if (auto.checked && idx < flat.length - 1) { idx++; paint(true); play(); } else { phase = "idle"; paint(); }
-          return;
-        }
+        if (left <= 0) { endTurn(); if (idx < flat.length - 1) { idx++; paint(true); play(); } else { phase = "idle"; paint(); } return; }
         left -= 0.25; gapT = setTimeout(step, 250);
       };
       paint(); step();
@@ -898,102 +1003,59 @@ function renderShadow(v) {
   prevB.onclick = () => { stop(); if (idx > 0) idx--; paint(true); };
   nextB.onclick = () => { stop(); if (idx < flat.length - 1) idx++; paint(true); };
   sel.onchange = () => { stop(); bi = +sel.value; store.set("book", bi); load(); };
-  auto.onchange = () => store.set("auto", auto.checked);
   slow.onchange = () => store.set("slow", slow.checked);
-  const attempts = stepAttempts("shadow");
-  const rec = recWidget("shadow", () => { endTurn(); const out = { label: BOOKS[bi].title, shadow: { book: BOOKS[bi].id, sentences: shadowed } }; shadowed = []; return out; },
-    () => attempts.paint(), t0 => { recT0 = t0; shadowed = []; });
-  v.append(wrap, focusNote(PLAN?.shadow_focus),
-    h("div", { class: "bar", style: "margin:0 0 12px" }, sel, h("label", { class: "tog", for: "auto" }, auto, "Auto-advance"), h("label", { class: "tog", for: "slow" }, slow, "Slower")),
-    box, state,
-    h("div", { class: "bar" }, prevB, playB, againB, nextB), src,
-    h("h4", { class: "sub" }, "Get feedback"),
-    h("p", { class: "note", style: "margin:0" }, "Tap Record, shadow a few sentences, then Stop. Your coach compares each repeat with the narrator."),
-    rec, attempts,
-    h("div", { class: "bar" }, nextBtn("shadow")));
+  const rec = opts.rec(() => { endTurn(); const out = { label: BOOKS[bi].title, shadow: { book: BOOKS[bi].id, sentences: shadowed } }; shadowed = []; return out; },
+    null, t0 => { recT0 = t0; shadowed = []; });
   load();
-  cleanup = () => { stop(); timer.stop(); };
+  return { el: h("div", {}, h("div", { class: "bar", style: "margin:0 0 12px" }, sel, h("label", { class: "tog", for: "slow" }, slow, "Slower")),
+    box, state, h("div", { class: "bar" }, prevB, playB, againB, nextB), rec), stop };
 }
 
-function renderEnun(v) {
-  /* -1 is the passage your coach wrote for the sounds you fumble; the rest rotate daily. */
-  const coach = PLAN?.enunciate?.text ? { t: PLAN.enunciate.title || "From your coach", a: "Written for you by your coach", p: [PLAN.enunciate.text], how: PLAN.enunciate.how } : null;
-  const n = coach ? -1 : Math.floor(Date.now() / 864e5) % ENUNCIATE.length;
-  let k = store.get("enunPick:" + today(), n); if (k === -1 && !coach) k = 0;
-  const { wrap, timer } = stepHead("Enunciate", 60,
-    "Read it once slowly, exaggerating every mouth movement: full lip rounding, crisp consonants, open vowels. Then once at normal speed.");
-  const card = h("div", { class: "card" });
-  const paint = () => { const e = k === -1 ? coach : ENUNCIATE[k]; card.innerHTML = "";
-    card.append(e.how ? h("p", { class: "note", style: "margin:0 0 12px" }, e.how) : "", h("div", { class: "text" }, e.p.map(p => h("p", {}, p))), h("div", { class: "src" }, e.t + ", " + e.a)); };
-  const other = h("button", { class: "btn ghost", type: "button", onclick: () => {
-    k = k + 1 >= ENUNCIATE.length ? (coach ? -1 : 0) : k + 1; store.set("enunPick:" + today(), k); paint(); } }, "Different paragraph");
-  paint();
-  const attempts = stepAttempts("enun");
-  v.append(wrap, card, h("div", { class: "bar" }, other),
-    h("h4", { class: "sub" }, "Get feedback"),
-    h("p", { class: "note", style: "margin:0" }, "Record both passes (slow, then normal speed) and your coach checks your articulation."),
-    recWidget("enun", () => { const e = k === -1 ? coach : ENUNCIATE[k]; return { label: e.t, text: e.p.join("\n") }; }, () => attempts.paint()),
-    attempts, h("div", { class: "bar" }, nextBtn("enun")));
-  cleanup = () => timer.stop();
-}
-
-/* What the coach needs to know about a page: its text and the words you marked. */
-function pageMeta(pi, label) {
-  const pg = PAGES[pi], words = pg.paras.join(" ").split(" "), marks = store.get("marks:" + pi, []);
-  return { label, text: pg.paras.join("\n\n"), marks: marks.sort((a, b) => a - b).map(i => words[i]).filter(Boolean) };
-}
-
-/* Weekly: the same page every week, compared side by side. */
-async function weeklyTakes() { return TAKES.filter(t => t.kind === "weekly"); }
-let weeklyCache = [];
-function weekDue() { const last = weeklyCache[0]; return !last || Date.now() - last.ts > 6.5 * 864e5; }
-function renderWeek(v) {
-  const pg = PAGES[0];
-  const card = h("div", { class: "card" }, h("div", { class: "text" }, pg.paras.map(p => h("p", {}, p))), h("div", { class: "src" }, pg.book.title + ", " + pg.book.author + " · always this page"));
-  const list = h("div", { class: "takes" });
-  const paint = async () => {
-    weeklyCache = await weeklyTakes(); paintNav();
-    list.innerHTML = "";
-    if (!weeklyCache.length) { list.append(h("div", { class: "empty" }, "No weekly recordings yet. Record this page today; next week you will hear the two side by side.")); return; }
-    const [latest, prev] = weeklyCache, first = weeklyCache[weeklyCache.length - 1];
-    list.append(h("div", { class: "note" }, "Compare"));
-    list.append(takeRow(latest, paint, "This week", true));
-    if (prev) list.append(takeRow(prev, paint, "Week before"));
-    if (first !== latest && first !== prev) list.append(takeRow(first, paint, "Your first"));
-    const rest = weeklyCache.slice(2).filter(t => t !== first);
-    if (rest.length) list.append(h("div", { class: "note", style: "margin-top:8px" }, "Earlier"), ...rest.map(t => takeRow(t, paint)));
-  };
-  v.append(h("div", { class: "head" }, h("h2", {}, "Weekly recording")),
-    h("p", { class: "how" }, "Once a week, record this same page. Listen to it next to last week’s: is the pitch moving more, are the marked words landing, are the endings crisp?"),
-    card, recWidget("weekly", () => pageMeta(0, "Weekly page"), () => { markStep("week"); paint(); }), list);
-  paint();
-}
-
-/* Progress: score trends across every reviewed take, then every take with its notes. */
-function renderProgress(v) {
-  const done = reads().filter(t => t.status === "done" && t.feedback?.scores).slice().reverse();
-  v.append(h("div", { class: "head" }, h("h2", {}, "Progress")),
-    h("p", { class: "how" }, "Every recording you make is kept here with your coach’s notes. Scores are 1 to 5; tap a timestamp to hear that moment."),
-    installCard(), uploadWidget(() => go("coach")));
+/* ---------- Journey: your path of focuses, every lesson, every recording ---------- */
+function renderJourney(v) {
   const days = [], log = dayLog();
   for (let i = 13; i >= 0; i--) { const dt = new Date(); dt.setDate(dt.getDate() - i); days.push(h("i", { class: log[dayStr(dt)]?.length ? "on" : "", title: dayStr(dt) })); }
-  v.append(h("div", { class: "stats" },
+  v.append(h("div", { class: "head" }, h("h2", {}, "Journey")), installCard(),
+    h("div", { class: "stats" },
       h("div", { class: "stat" }, h("b", {}, "🔥 " + streak()), h("span", {}, "day streak")),
-      h("div", { class: "stat" }, h("b", {}, reads().filter(t => t.kind === "daily").length), h("span", {}, "reads")),
-      h("div", { class: "stat" }, h("b", {}, DRILLS.filter(d => d.status !== "active").length), h("span", {}, "drills learned"))),
+      h("div", { class: "stat" }, h("b", {}, LESSONS.filter(l => l.status === "done").length), h("span", {}, "lessons")),
+      h("div", { class: "stat" }, h("b", {}, DRILLS.filter(d => d.stage === "learned" || d.stage === "review").length), h("span", {}, "focuses passed"))),
     h("div", { class: "days", "aria-label": "Last 14 days" }, days));
-  if (done.length) {
+  /* the path: current focus, then what's in review, what's next, what's learned */
+  const by = st => DRILLS.filter(d => d.stage === st);
+  const path = h("ol", { class: "path" });
+  const node = (d, cls, sub) => {
+    const att = (d.attempts || []).slice().sort((a, b) => b.ts - a.ts);
+    return h("li", { class: cls }, h("details", {}, h("summary", {}, h("b", {}, d.title), h("span", {}, sub)),
+      att.length ? att.map(a => attemptRow(a)) : h("p", { class: "note" }, "No attempts yet.")));
+  };
+  by("current").forEach(d => path.append(node(d, "cur", "Current focus · passed " + d.passes + " of 3 days")));
+  by("review").forEach(d => path.append(node(d, "rev", "Passed · next review " + fmtDay(d.due * 1000))));
+  const q = by("queued");
+  q.slice(0, 3).forEach(d => path.append(node(d, "next", "Up next" + (d.flags > 1 ? " · raised " + d.flags + " times" : ""))));
+  if (q.length > 3) path.append(h("li", { class: "next more" }, h("span", { class: "note" }, "+ " + (q.length - 3) + " more queued")));
+  by("learned").forEach(d => path.append(node(d, "learned", "Learned ✓")));
+  v.append(h("h3", { class: "sec" }, "Your path"), DRILLS.length ? path : h("p", { class: "note" }, "Your first lesson sets your first focus."));
+  /* lessons, newest first, read-only */
+  const done = LESSONS.filter(l => l.status === "done" || l.takes.length);
+  if (done.length) v.append(h("h3", { class: "sec" }, "Lessons"), ...done.map(l => {
+    const d = h("details", { class: "lesson-row" }, h("summary", {}, h("b", {}, (l.kind === "checkin" ? "Check-in · " : "") + "Lesson " + l.n),
+      h("span", {}, fmtDay(new Date(l.date + "T12:00").getTime()) + (l.focus ? " · " + l.focus.title : ""))));
+    d.addEventListener("toggle", () => { if (d.open && d.children.length === 1) d.append(lessonResults(l, false)); });
+    return d;
+  }));
+  /* everything else: free-play reads, uploads, recordings from before lessons */
+  const other = reads().filter(t => !t.lesson_id);
+  if (other.length) v.append(h("details", { class: "older" }, h("summary", {}, "Other recordings (" + other.length + ")"),
+    h("div", { class: "takes" }, other.map(t => takeRow(t, () => go("journey"), t.kind === "weekly" ? "Weekly" : t.kind === "upload" ? "Uploaded" : "Practice", false)))));
+  const scored = reads().filter(t => t.status === "done" && t.feedback?.scores).slice().reverse();
+  if (scored.length > 1) {
     const grid = h("div", { class: "sparks" });
-    for (const [k, n] of SKILLS) grid.append(spark(n, done.map(t => ({ ts: t.ts, y: t.feedback.scores?.[k], s: sessionOf(t) })), 1, 5));
-    const w = done.filter(t => t.feedback.wpm);
-    if (w.length) grid.append(spark("Words / min", w.map(t => ({ ts: t.ts, y: t.feedback.wpm })), null, null));
-    v.append(grid);
+    for (const [k, n] of SKILLS) grid.append(spark(n, scored.map(t => ({ ts: t.ts, y: t.feedback.scores?.[k], s: sessionOf(t) })), 1, 5));
+    v.append(h("h3", { class: "sec" }, "Read scores over time"), grid);
   }
-  const list = h("div", { class: "takes" });
-  if (!reads().length) list.append(h("div", { class: "empty" }, "No recordings yet. Record yourself in the Read step and your coach’s notes will show up here."));
-  reads().forEach((t, i) => list.append(takeRow(t, () => go("coach"), t.kind === "weekly" ? "Weekly" : t.kind === "upload" ? "Uploaded" : null, false)));
-  v.append(list);
 }
+
 /* One skill over time: a single-series sparkline (latest value large, a dot per session, hover for date). */
 function spark(name, pts, lo, hi) {
   pts = pts.filter(p => p.y != null);
@@ -1027,7 +1089,7 @@ async function movedNotice() {
   const token = (/#import=(\w+)/.exec(location.hash) || [])[1];
   if (!old.length || (store.get("moved", false) && !token)) { location.replace(HOME); return; }
   try { BOOKS = await (await fetch("books.json")).json(); buildPages(); } catch {}
-  const v = $("#view"); v.innerHTML = ""; $("#steps").innerHTML = "";
+  const v = $("#view"); v.innerHTML = ""; $("#tabs").hidden = true;
   const status = h("p", { class: "how" });
   v.append(h("div", { class: "head" }, h("h2", {}, "Ten Minute Voice has moved")), status);
   if (token) {
@@ -1110,13 +1172,12 @@ function uploadWidget(onDone) {
   try { const r = await fetch("api/me"); if (r.status === 401) { location.href = "/__exe.dev/login?redirect=/"; return; } ME = await r.json(); } catch {}
   try { navigator.storage?.persist && navigator.storage.persist(); } catch {}
   if (ME) { $("#foot").prepend(h("div", {}, "Signed in as " + ME.email + ".")); await sync.pull(); }
-  current = IMPORTED ? "coach" : store.get("tab", "today") !== "today" ? store.get("tab") : store.get("step", "warm");
+  current = IMPORTED ? "journey" : store.get("tab", "today");
   try { BOOKS = await (await fetch("books.json")).json(); } catch { BOOKS = []; }
   buildPages();
   if (ME) { await loadTakes(); flushLocal().then(async n => { if (n) { await loadTakes(); go(current); } }); }
-  weeklyCache = await weeklyTakes();
   paintHud();
-  go(STEPS.some(s => s.id === current) || TABS.some(t => t.id === current && t.render) ? current : "warm");
+  go(current);
 })();
 </script>
 </body>

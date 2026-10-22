@@ -57,12 +57,22 @@ CREATE TABLE IF NOT EXISTS takes(
   text TEXT, marks TEXT, mime TEXT, status TEXT, feedback TEXT, words TEXT, error TEXT, model TEXT, analyzed INTEGER);
 CREATE INDEX IF NOT EXISTS takes_user ON takes(user_id, ts);
 """)
-for ddl in ("ALTER TABLE takes ADD COLUMN plan TEXT",       # next-session plan
-            "ALTER TABLE takes ADD COLUMN drill_id TEXT",   # set on drill attempts
-            "ALTER TABLE takes ADD COLUMN filed INTEGER",   # 1 once its lessons are in the drill library
-            """CREATE TABLE drills(id TEXT PRIMARY KEY, user_id TEXT, title TEXT, area TEXT, lesson TEXT, from_take TEXT,
-                 created INTEGER, due INTEGER, interval INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, status TEXT DEFAULT 'active')"""):
-    try: db.execute(ddl)  # added after launch; no-op once applied
+for ddl in (  # added after launch; each is a no-op once applied. Tables first, so a fresh database works too.
+        """CREATE TABLE drills(id TEXT PRIMARY KEY, user_id TEXT, title TEXT, area TEXT, lesson TEXT, from_take TEXT,
+             created INTEGER, due INTEGER, interval INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, status TEXT DEFAULT 'active')""",
+        """CREATE TABLE lessons(id TEXT PRIMARY KEY, user_id TEXT, date TEXT, n INTEGER, kind TEXT, focus_id TEXT, review_id TEXT,
+             page INTEGER, status TEXT DEFAULT 'active', created INTEGER, completed INTEGER)""",
+        "ALTER TABLE takes ADD COLUMN plan TEXT",                     # next-session plan (no longer written)
+        "ALTER TABLE takes ADD COLUMN drill_id TEXT",                 # set on exercise attempts
+        "ALTER TABLE takes ADD COLUMN filed INTEGER",                 # 1 once its lessons are in the curriculum
+        "ALTER TABLE takes ADD COLUMN lesson_id TEXT",                # set on recordings made inside a lesson
+        "ALTER TABLE takes ADD COLUMN step TEXT",                     # which lesson step: review, drill, read, shadow
+        "ALTER TABLE drills ADD COLUMN stage TEXT DEFAULT 'queued'",  # queued -> current -> review -> learned
+        "ALTER TABLE drills ADD COLUMN passes INTEGER DEFAULT 0",     # lesson days passed while current
+        "ALTER TABLE drills ADD COLUMN last_pass TEXT",
+        "ALTER TABLE drills ADD COLUMN level INTEGER DEFAULT 0",      # review passes
+        "ALTER TABLE drills ADD COLUMN flags INTEGER DEFAULT 1"):     # how many reviews raised this habit
+    try: db.execute(ddl)
     except sqlite3.OperationalError: pass
 
 def q(sql, args=(), one=False):
@@ -76,7 +86,7 @@ def take_json(r):
     d["feedback"] = json.loads(r["feedback"]) if r["feedback"] else None
     d["text"] = r["text"]; d["marks"] = json.loads(r["marks"] or "[]")
     d["plan"] = json.loads(r["plan"]) if r["plan"] else None
-    d["drill_id"] = r["drill_id"]
+    d["drill_id"] = r["drill_id"]; d["lesson_id"] = r["lesson_id"]; d["step"] = r["step"]
     return d
 
 def audio_path(r, ext="mp3"): return os.path.join(DATA, "audio", r["user_id"], r["id"] + "." + ext)
@@ -390,9 +400,7 @@ def analyze(take_id):
         traceback.print_exc()
         q("UPDATE takes SET status='error', error=? WHERE id=?", (str(e)[:500], take_id))
         return
-    if r["kind"] in READ_KINDS:
-        file_drills(take_id)
-        plan_next(take_id)
+    if r["kind"] in READ_KINDS: file_drills(take_id)
 
 # ---------- drills: an exercise from a lesson, practised on its own and repeated on a schedule ----------
 GRADE_SCHEMA = _obj({
@@ -401,12 +409,15 @@ GRADE_SCHEMA = _obj({
     "tip": {"type": "string", "description": "The one physical adjustment for the next try (empty if got_it)."},
 })
 DAY = 86400
-STEPS_DAYS = [1, 2, 4, 8]   # gap after each on-schedule pass in a row
-GRADUATE_AFTER = 5          # passes in a row (the last ones at 8 days) to graduate
+# The curriculum: each drill is a focus. One is "current" at a time; pass it in lessons on PASS_DAYS different days and it
+# moves to review, coming back at REVIEW_GAPS days; pass every review and it's learned.
+PASS_DAYS = 3
+REVIEW_GAPS = [3, 7, 21]
 
-def drill_json(d, attempts):
-    return {k: d[k] for k in ("id", "title", "area", "created", "due", "interval", "streak", "status", "from_take")} | {
-        "lesson": json.loads(d["lesson"]), "attempts": attempts}
+def drill_json(d, attempts=None):
+    out = {k: d[k] for k in ("id", "title", "area", "created", "due", "stage", "passes", "level", "flags", "from_take")} | {"lesson": json.loads(d["lesson"])}
+    if attempts is not None: out["attempts"] = attempts
+    return out
 
 def word_table(pros):
     return "\n".join("%.2f-%.2f | %s | %s | %s | %s | %s | %s | %s" % (w["s"], w["e"], w["w"], w["st"], w["move"], w["db"], w["tail"], w["gap"], w.get("p"))
@@ -463,7 +474,7 @@ def grade_drill(r, mp3, words):
             d["title"], d["area"], CITE.sub(lambda m: m[1], lesson.get("hear", "")), lesson.get("why", ""), lesson.get("exercise", ""),
             "\n".join("- " + x for x in lesson.get("steps", [])), lesson.get("feel", "")))
     fb = quick_grade(r, mp3, words, task, past_attempts(r, "drill_id=?", (d["id"],)))
-    schedule(d, fb["grade"], r["ts"] / 1000)
+    if r["lesson_id"]: progress(d, r, fb["grade"])
 
 def grade_enun(r, mp3, words):
     task = ("This is their enunciation exercise: read the passage once slowly with exaggerated articulation "
@@ -508,94 +519,86 @@ def grade_shadow(r, mp3, words):
 GRADERS = {"drill": grade_drill, "enun": grade_enun, "shadow": grade_shadow}
 READ_KINDS = ("daily", "weekly", "upload")  # full reviews; the rest get a quick grade
 
-FILE_SCHEMA = _obj({"new": {"type": "array", "items": {"type": "integer"},
-                             "description": "Indexes of lessons whose exercise is not already covered by one of the existing drills."}})
+FILE_SCHEMA = _obj({"same_as": {"type": "array", "items": {"type": "integer"},
+    "description": "One entry per new lesson, in order: the number of the existing focus it works on, or -1 if it's a new habit."}})
 
-def make_drill(t, n, lesson, due):
+def make_drill(t, n, lesson):
     did = "%s-L%d" % (t["id"], n)
     if not q("SELECT 1 FROM drills WHERE id=?", (did,), one=True):
-        q("INSERT INTO drills(id,user_id,title,area,lesson,from_take,created,due) VALUES(?,?,?,?,?,?,?,?)",
-          (did, t["user_id"], lesson.get("title", ""), lesson.get("area", ""), json.dumps(lesson), t["id"], int(time.time()), due))
+        q("INSERT INTO drills(id,user_id,title,area,lesson,from_take,created,due,stage) VALUES(?,?,?,?,?,?,?,?,'queued')",
+          (did, t["user_id"], lesson.get("title", ""), lesson.get("area", ""), json.dumps(lesson), t["id"], int(time.time()), int(time.time())))
     return did
 
 def file_drills(take_id):
-    """Put each new exercise from a review into the drill library, due now. Claude skips ones the library already covers."""
+    """Add each new habit from a review to the curriculum queue. A habit the queue already has gets flagged again,
+    which moves it up: the queue is ordered by how often reviews raise it."""
     t = q("SELECT * FROM takes WHERE id=?", (take_id,), one=True)
     lessons = (json.loads(t["feedback"]) if t and t["feedback"] else {}).get("lessons") or []
     if not lessons: return q("UPDATE takes SET filed=1 WHERE id=?", (take_id,))
-    have = q("SELECT id, title, lesson FROM drills WHERE user_id=? AND status='active'", (t["user_id"],))
-    new = list(range(len(lessons)))
+    have = q("SELECT id, title, lesson FROM drills WHERE user_id=? AND stage IN ('queued','current') ORDER BY created", (t["user_id"],))
+    same = [-1] * len(lessons)
     if have:
         try:
-            new = call_claude("A voice student's drill library and the lessons from their newest review. Which lessons teach something "
-                "the library doesn't already drill? A lesson is covered if an existing drill works on the same habit with the same kind of "
-                "exercise, even if worded differently.\n\nExisting drills:\n" + "\n".join(
-                    "- %s: %s" % (d["title"], json.loads(d["lesson"]).get("exercise", "")) for d in have) +
-                "\n\nNew lessons:\n" + "\n".join("%d. %s: %s" % (i, l.get("title", ""), l.get("exercise", "")) for i, l in enumerate(lessons)),
-                schema=FILE_SCHEMA, effort="low")["new"]
+            same = call_claude("A voice student's current focuses (habits they're working on) and the lessons from their newest review. "
+                "For each new lesson, say which existing focus works on the same habit (even if worded differently or using another exercise), "
+                "or -1 if it's a different habit.\n\nExisting focuses:\n" + "\n".join(
+                    "%d. %s: %s" % (i, d["title"], json.loads(d["lesson"]).get("exercise", "")) for i, d in enumerate(have)) +
+                "\n\nNew lessons:\n" + "\n".join("- %s: %s" % (l.get("title", ""), l.get("exercise", "")) for l in lessons),
+                schema=FILE_SCHEMA, effort="low")["same_as"]
         except Exception: traceback.print_exc()
-    for n in sorted(set(i for i in new if 0 <= i < len(lessons))):
-        make_drill(t, n, lessons[n], int(time.time()))
+    for n, l in enumerate(lessons):
+        k = same[n] if n < len(same) else -1
+        if 0 <= k < len(have): q("UPDATE drills SET flags=flags+1 WHERE id=?", (have[k]["id"],))
+        else: make_drill(t, n, l)
     q("UPDATE takes SET filed=1 WHERE id=?", (take_id,))
 
-def schedule(d, grade, when):
-    """Only attempts made when the drill was due move the schedule; extra practice is just logged."""
-    if d["status"] != "active" or (d["due"] or 0) > when: return
-    streak, interval = d["streak"], d["interval"]
-    if grade == "got_it":
-        streak += 1; interval = STEPS_DAYS[min(streak, len(STEPS_DAYS)) - 1]
-    elif grade == "not_yet":
-        streak, interval = 0, 1
-    else:
-        interval = 1
-    status = "graduated" if streak >= GRADUATE_AFTER else "active"
-    q("UPDATE drills SET streak=?, interval=?, due=?, status=? WHERE id=?", (streak, interval, int(when + interval * DAY - 4 * 3600), status, d["id"]))
+def progress(d, r, grade):
+    """Move a focus along the curriculum. Only lesson attempts count; free practice is just logged."""
+    les = q("SELECT * FROM lessons WHERE id=?", (r["lesson_id"],), one=True)
+    if not les: return
+    now = int(time.time())
+    if r["step"] == "drill" and d["stage"] == "current" and grade == "got_it" and d["last_pass"] != les["date"]:
+        passes = d["passes"] + 1
+        if passes >= PASS_DAYS:
+            q("UPDATE drills SET passes=?, last_pass=?, stage='review', level=0, due=? WHERE id=?", (passes, les["date"], now + REVIEW_GAPS[0] * DAY - 4 * 3600, d["id"]))
+        else:
+            q("UPDATE drills SET passes=?, last_pass=? WHERE id=?", (passes, les["date"], d["id"]))
+    elif r["step"] == "review" and d["stage"] == "review":
+        if grade == "got_it":
+            level = d["level"] + 1
+            if level >= len(REVIEW_GAPS): q("UPDATE drills SET level=?, stage='learned' WHERE id=?", (level, d["id"]))
+            else: q("UPDATE drills SET level=?, due=? WHERE id=?", (level, now + REVIEW_GAPS[level] * DAY - 4 * 3600, d["id"]))
+        else:
+            q("UPDATE drills SET due=? WHERE id=?", (now + DAY - 4 * 3600, d["id"]))
 
-# ---------- next-session plan ----------
-PLAN_SCHEMA = _obj({
-    "why": {"type": "string", "description": "One sentence to the student: what today's session targets and why, from the last review."},
-    "warmup": {"type": "array", "description": "3-4 moves, about 60 seconds in total, each aimed at a lesson from the review.",
-               "items": _obj({"name": {"type": "string", "description": "Short exercise name."},
-                              "cue": {"type": "string", "description": "One or two sentences: exactly what to do and what to feel."},
-                              "secs": {"type": "integer", "description": "10-20"}})},
-    "read_focus": {"type": "string", "description": "The ONE physical cue to hold while reading today, phrased as an instruction."},
-    "shadow_focus": {"type": "string", "description": "The ONE thing to copy from the narrator today, tied to the same issue."},
-    "enunciate": _obj({"title": {"type": "string"},
-                       "text": {"type": "string", "description": "A 40-70 word passage or set of lines, packed with the exact sounds and transitions this student fumbles. Can be original."},
-                       "how": {"type": "string", "description": "How to read it: one slow exaggerated pass with a specific physical cue, then one at speed."}}),
-})
+# ---------- lessons: one a day, fixed when started ----------
+def lesson_json(l):
+    f = q("SELECT * FROM drills WHERE id=?", (l["focus_id"],), one=True) if l["focus_id"] else None
+    rv = q("SELECT * FROM drills WHERE id=?", (l["review_id"],), one=True) if l["review_id"] else None
+    takes = [take_json(t) for t in q("SELECT * FROM takes WHERE lesson_id=? ORDER BY ts", (l["id"],))]
+    return {k: l[k] for k in ("id", "date", "n", "kind", "page", "status", "created", "completed")} | {
+        "focus": drill_json(f) if f else None, "review": drill_json(rv) if rv else None, "takes": takes}
 
-PLANNER = """You are the student's voice teacher planning their next 6-minute practice session \
-(1 min warm-up, 2 min read a page aloud and record it, 2 min shadow a narrator, 1 min enunciation) from your review of their last recording. \
-Make every part of the session work on the lessons from that review, most important first. Use the exercises you prescribed, \
-cut down to fit the time. Write directly to the student, in plain warm language, with physical cues they can feel. \
-No numbers or measurements.
-
-Your review of their last recording (%s):
-%s
-
-The passage they read:
-\"\"\"%s\"\"\"
-"""
-
-def plan_next(take_id):
-    r = q("SELECT * FROM takes WHERE id=?", (take_id,), one=True)
-    if not r or not r["feedback"]: return
-    fb = json.loads(r["feedback"])
-    review = CITE.sub(lambda m: "'%s'" % m[1], json.dumps({k: fb.get(k) for k in ("summary", "lessons", "priorities", "moments", "drill")}))
-    try:
-        plan = call_claude(PLANNER % (time.strftime("%b %d", time.localtime(r["ts"] / 1000)), review, (r["text"] or "")[:3000]),
-                           schema=PLAN_SCHEMA, effort="medium")
-        plan["from"] = r["id"]; plan["ts"] = r["ts"]
-        q("UPDATE takes SET plan=? WHERE id=?", (json.dumps(plan), take_id))
-    except Exception:
-        traceback.print_exc()
+def start_lesson(uid, date, page):
+    l = q("SELECT * FROM lessons WHERE user_id=? AND date=?", (uid, date), one=True)
+    if l: return l
+    n = q("SELECT COUNT(*) c FROM lessons WHERE user_id=?", (uid,), one=True)["c"] + 1
+    cur = q("SELECT * FROM drills WHERE user_id=? AND stage='current'", (uid,), one=True)
+    if not cur:  # next focus: the habit reviews raise most, then the oldest
+        cur = q("SELECT * FROM drills WHERE user_id=? AND stage='queued' ORDER BY flags DESC, created LIMIT 1", (uid,), one=True)
+        if cur: q("UPDATE drills SET stage='current', passes=0 WHERE id=?", (cur["id"],))
+    rv = q("SELECT * FROM drills WHERE user_id=? AND stage='review' AND due<=? ORDER BY due LIMIT 1", (uid, int(time.time())), one=True)
+    kind = "checkin" if n % 7 == 0 else "daily"
+    lid = "lesson-%s-%d" % (uid[:8], int(time.time() * 1000))
+    q("INSERT INTO lessons(id,user_id,date,n,kind,focus_id,review_id,page,created) VALUES(?,?,?,?,?,?,?,?,?)",
+      (lid, uid, date, n, kind, cur["id"] if cur else None, rv["id"] if rv else None, 0 if kind == "checkin" else int(page or 0), int(time.time())))
+    return q("SELECT * FROM lessons WHERE id=?", (lid,), one=True)
 
 def worker():
     while True:
         tid = jobs.get()
         try:
-            if isinstance(tid, tuple): {"plan": plan_next, "file": file_drills}[tid[0]](tid[1])
+            if isinstance(tid, tuple): file_drills(tid[1])
             else: analyze(tid)
         finally: jobs.task_done()
 
@@ -676,7 +679,10 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/drills":
             att = {}
             for a in q("SELECT * FROM takes WHERE user_id=? AND kind='drill' ORDER BY ts", (me["id"],)): att.setdefault(a["drill_id"], []).append(take_json(a))
-            return self.send(200, [drill_json(d, att.get(d["id"], [])) for d in q("SELECT * FROM drills WHERE user_id=? ORDER BY due", (me["id"],))])
+            return self.send(200, [drill_json(d, att.get(d["id"], [])) for d in q(
+                "SELECT * FROM drills WHERE user_id=? ORDER BY CASE stage WHEN 'current' THEN 0 WHEN 'review' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END, flags DESC, created", (me["id"],))])
+        if p == "/api/lessons":
+            return self.send(200, [lesson_json(l) for l in q("SELECT * FROM lessons WHERE user_id=? ORDER BY n DESC", (me["id"],))])
         m = re.fullmatch(r"/api/takes/([\w:.-]+)(/audio)?", p)
         if m:
             r = q("SELECT * FROM takes WHERE id=? AND user_id=?", (m[1], me["id"]), one=True)
@@ -736,16 +742,16 @@ class H(BaseHTTPRequestHandler):
             IMPORT_TOKENS[tok] = (me["id"], time.time() + 1800)
             return self.send(200, {"token": tok})
         if p == "/api/takes": return self.save_take(me)
-        if p == "/api/drills":
-            # make a drill from lesson N of a reviewed take (or return the one already made)
-            try: a = json.loads(self.body(1 << 16)); n = int(a["lesson"])
+        if p == "/api/lesson":  # today's lesson: made once per date, then fixed
+            try: a = json.loads(self.body(1 << 16))
             except Exception: return self.send(400, {"error": "bad request"})
-            t = q("SELECT * FROM takes WHERE id=? AND user_id=?", (a.get("take_id"), me["id"]), one=True)
-            lessons = (json.loads(t["feedback"]) if t and t["feedback"] else {}).get("lessons") or []
-            if not 0 <= n < len(lessons): return self.send(404, {"error": "lesson not found"})
-            did = make_drill(t, n, lessons[n], int(time.time()))
-            d = q("SELECT * FROM drills WHERE id=?", (did,), one=True)
-            return self.send(200, drill_json(d, [take_json(x) for x in q("SELECT * FROM takes WHERE drill_id=? ORDER BY ts", (did,))]))
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", a.get("date", "")): return self.send(400, {"error": "bad date"})
+            return self.send(200, lesson_json(start_lesson(me["id"], a["date"], a.get("page"))))
+        m = re.fullmatch(r"/api/lesson/([\w.-]+)/done", p)
+        if m:
+            q("UPDATE lessons SET status='done', completed=? WHERE id=? AND user_id=? AND status='active'", (int(time.time()), m[1], me["id"]))
+            l = q("SELECT * FROM lessons WHERE id=? AND user_id=?", (m[1], me["id"]), one=True)
+            return self.send(200, lesson_json(l)) if l else self.send(404, {"error": "not found"})
         m = re.fullmatch(r"/api/takes/([\w:.-]+)/analyze", p)
         if m:
             r = q("SELECT * FROM takes WHERE id=? AND user_id=?", (m[1], me["id"]), one=True)
@@ -783,9 +789,11 @@ class H(BaseHTTPRequestHandler):
         except ValueError: secs = float(meta.get("secs") or 0)
         ts = int(meta.get("ts") or time.time() * 1000)
         drill = q("SELECT id FROM drills WHERE id=? AND user_id=?", (meta.get("drill_id"), me["id"]), one=True) if meta.get("drill_id") else None
-        q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status,drill_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        les = q("SELECT id FROM lessons WHERE id=? AND user_id=? AND status='active'", (meta.get("lesson_id"), me["id"]), one=True) if meta.get("lesson_id") else None
+        q("INSERT INTO takes(id,user_id,kind,label,ts,secs,text,marks,mime,status,drill_id,lesson_id,step) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
           (tid, me["id"], "drill" if drill else meta.get("kind", "daily"), meta.get("label", ""), ts, round(secs, 2), meta.get("text", ""),
-           json.dumps(meta.get("shadow") if meta.get("kind") == "shadow" else meta.get("marks", [])), mime, "queued", drill["id"] if drill else None))
+           json.dumps(meta.get("shadow") if meta.get("kind") == "shadow" else meta.get("marks", [])), mime, "queued", drill["id"] if drill else None,
+           les["id"] if les else None, meta.get("step") if les else None))
         self.queue_if_allowed(me, tid)
         return self.send(200, take_json(q("SELECT * FROM takes WHERE id=?", (tid,), one=True)), headers=extra)
 
@@ -822,9 +830,6 @@ if __name__ == "__main__":
     # reviews from before the library existed: file their exercises (oldest first, so later ones dedupe against them)
     for r in q("SELECT id FROM takes WHERE status='done' AND filed IS NULL AND kind IN ('daily','weekly','upload') ORDER BY ts"):
         jobs.put(("file", r["id"]))
-    # each person's latest review should have a plan for their next session
-    for r in q("SELECT t.id FROM takes t WHERE status='done' AND plan IS NULL AND kind IN ('daily','weekly','upload') AND ts=(SELECT MAX(ts) FROM takes WHERE user_id=t.user_id AND status='done' AND kind IN ('daily','weekly','upload'))"):
-        jobs.put(("plan", r["id"]))
     for r in q("SELECT id FROM takes WHERE status IN ('queued','processing')" + (" OR status='nokey'" if coach_ready() else "") + " ORDER BY ts"):
         jobs.put(r["id"])
     threading.Thread(target=worker, daemon=True).start()
